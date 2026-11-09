@@ -30,9 +30,22 @@ On Transformers 4.40.2, the model loader reported a `flash_attn` dependency desp
 
 For an initial smoke test, the participant downloaded FUNSD locally outside the repository and used `testing_data/images/82837252.png` (754 × 1000). With `<OCR>`, greedy decoding (`num_beams=1`), and `max_new_tokens=256`, the reported inputs were `input_ids` of shape `(1, 10)` (int64), `attention_mask` of shape `(1, 10)`, and `pixel_values` of shape `(1, 3, 768, 768)` (float32). One cold generation took 9.24 s and returned 221 tokens and plausible text, with spacing and recognition errors. This is not an end-to-end server latency benchmark, a p50 measurement, or an official accuracy score. The organizer's generation settings and references remain unknown.
 
+### Five-image provisional references
+
+The participant generated local FP32 references for five FUNSD test images, after one warm-up, using greedy decoding, `use_cache=True`, a 256-new-token cap, and 12 PyTorch threads. The local JSON records image hashes, output text, token IDs, settings, and package versions. Single generation times were 8.36, 6.81, 7.52, 9.33, and 9.07 seconds; returned sequence lengths were 221, 155, 205, 257, and 257. All ended in EOS, but the two 257-token sequences may have reached the cap with a forced EOS; this must be checked before assuming they are complete. A follow-up at 512 new tokens found `forced_eos_token_id=2` and `eos_token_id=2`: `82251504.png` returned 323 tokens in 11.71 s, with text differing from the 256-token run; `93106788.png` returned 513 tokens in 16.45 s, also with different text, and may still have hit the limit. The 256-token results for both should not be assumed complete. These are exploratory timings, not p50, end-to-end latency, or official accuracy measurements. Warnings included `resume_download` deprecation and `early_stopping=True` with one beam.
+
+### Conversion experiments
+
+The conversion environment is separate from the reference environment: Python 3.12, PyTorch 2.15.0+cpu, Transformers 4.48.3, ONNX 1.17.0, ONNX Runtime 1.20.1, and Optimum 1.24.0. The pinned checkpoint loaded with no missing or unexpected keys and without the earlier `flash_attn` import problem.
+
+A public Florence-2 export script was reviewed. It is real but targets a fine-tuned checkpoint and reimplements part of the image path, so it is treated only as a reference design. Our own export wraps the model's existing image-encoding method and fixes the input at 768 × 768, because that is the only size the processor produces and dynamic shapes were the most likely source of tracing errors.
+
+The first vision-encoder graph exported in about 37 s to a 349 MiB FP32 file and ran under the CPU execution provider. Against PyTorch on one fixed random input and three FUNSD images, the largest absolute difference was 8.2 × 10⁻⁵ to 4.1 × 10⁻⁴, the relative L2 difference was about 4 × 10⁻⁶, and cosine similarity rounded to 1.0. The difference was stable across repeated runs. This establishes numerical equivalence for the vision path only; the language encoder, decoder, cache handling, and tokenizer remain unverified.
+
 ## Experiments
 
 | Date | Change | Accuracy | p50 latency | Max RPS | Kept? |
 |---|---|---|---|---|---|
 | — | Offline CPU model smoke test; one cold generation: 9.24 s | Not measured | Not measured | Not measured | Exploratory |
+| — | Vision-encoder ONNX export, fixed 768 × 768, FP32 | Not applicable | Not measured | Not measured | Parity verified, kept |
 | — | Server baseline | Not measured | Not measured | Not measured | Pending |
