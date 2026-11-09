@@ -42,6 +42,12 @@ A public Florence-2 export script was reviewed. It is real but targets a fine-tu
 
 The first vision-encoder graph exported in about 37 s to a 349 MiB FP32 file and ran under the CPU execution provider. Against PyTorch on one fixed random input and three FUNSD images, the largest absolute difference was 8.2 × 10⁻⁵ to 4.1 × 10⁻⁴, the relative L2 difference was about 4 × 10⁻⁶, and cosine similarity rounded to 1.0. The difference was stable across repeated runs. This establishes numerical equivalence for the vision path only; the language encoder, decoder, cache handling, and tokenizer remain unverified.
 
+The token-embedding and language-encoder graphs matched PyTorch to a relative L2 difference near 10⁻⁶, including a deliberately padded second length, so the encoder's declared dynamic sequence length is real rather than nominal. A one-off test then settled how the decoder treats its inputs on cached steps: replacing the encoder features with same-shape zeros left the logits bit-identical, while a zero-length tensor changed them by more than 3 logits. The cached cross-attention therefore ignores the feature values but still consumes their length.
+
+Two decoder graphs were exported: a prefill graph that emits logits plus all 24 cache tensors, and a step graph that takes the 24 cached tensors and emits 12 updated self-attention ones, keeping the cross-attention cache from prefill. Prefill and three chained steps matched PyTorch logits to about 2 × 10⁻⁵ with identical argmax at each step; the cache tensors themselves matched to about 3 × 10⁻⁶. Tracing removed the unused encoder-feature input from the step graph automatically.
+
+One constraint came out of an attempted second encoder length: the step graph broadcasts the encoder attention mask against the cached cross-attention tensors, so its mask length must equal the prefill encoder length. For `<OCR>` that length is 587; a different prompt length simply requires that prefill and steps agree. Full generation against the existing references, and a PyTorch-free preprocessing and tokenizer path, remain untested.
+
 ## Experiments
 
 | Date | Change | Accuracy | p50 latency | Max RPS | Kept? |
