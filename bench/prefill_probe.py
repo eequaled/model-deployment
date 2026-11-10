@@ -206,7 +206,8 @@ def main() -> int:
               f"{row['len']:>3} tokens -> {verdict}")
 
     # The two questions, answered separately and printed as a machine-readable line.
-    best = max(results, key=lambda m: (results[m]["agree_with_reference"], -results[m]["len"]))
+    # Ties prefer "start": it is the documented default and where model.generate() begins.
+    best = max(results, key=lambda m: (results[m]["agree_with_reference"], m == "start", -results[m]["len"]))
     full_vs_last_at = None
     if "prompt" in results and "last" in results:
         agree, full_vs_last_at = agreement(results["prompt"]["tokens"], results["last"]["tokens"])
