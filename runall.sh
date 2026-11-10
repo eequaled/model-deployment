@@ -15,8 +15,8 @@ set -u
 cd "$(dirname "$0")" || exit 1
 
 LAB="${FLORENCE_LAB:-$HOME/florence-lab}"
-NEW="$LAB/onnx-export-v2"
-OLD="$LAB/onnx-export"
+NEW="${NEW:-$LAB/onnx-export-v3}"
+OLD="${OLD:-$LAB/onnx-export-v2}"
 IMAGES="$LAB/funsd/dataset/testing_data/images"
 LOG_DIR="results"
 MASTER="$LOG_DIR/runall.log"
@@ -146,12 +146,14 @@ PY
   fi
 
   # 2. token-level parity, old graphs vs new graphs (same PT loop) ----------
-  if [ -d "$OLD" ]; then
+  if [ -f "$OLD/meta.json" ]; then
     run parity "$LOG_DIR/parity.log" python bench/parity.py \
       --old "$OLD" --new "$NEW" --images "$IMAGES" --max-new 256
     grep -E '^(\{"check"|PARITY)' "$LOG_DIR/parity.log" >>"$MASTER" 2>/dev/null
+  elif [ "$OLD" = "$NEW" ]; then
+    say parity "SKIP (OLD == NEW == $OLD; the export above overwrote the baseline -- set OLD to a pre-change snapshot)"
   else
-    say parity "SKIP (no previous export at $OLD to compare against)"
+    say parity "SKIP (no baseline meta.json at $OLD/meta.json to compare against)"
   fi
 
   # 3. unit tests ----------------------------------------------------------
