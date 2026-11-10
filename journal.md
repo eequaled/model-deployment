@@ -135,7 +135,7 @@ Notes on the table:
 
 **Export died with `RuntimeError: operator torchvision::nms does not exist`.** The Dockerfile exporter stage installed CPU `torch` without `torchvision`, so `timm` pulled a mismatched PyPI `torchvision` built against a different torch. The error names torchvision's NMS operator, so the mismatch is in the installed torch/torchvision pair, not in the model code. Fixed by installing `torch torchvision` together from the CPU index.
 
-**The test suite errored at setup.** `test_unknown_prefill_mode_fails_at_startup(model_dir)` asked for a fixture that does not exist; the fixture is `tiny_model_dir`. Fixed the argument. The suite is now 24 passed / 6 skipped without weights and 30 passed with the real export, with 0 errors.
+**The test suite errored at setup.** `test_unknown_prefill_mode_fails_at_startup(model_dir)` asked for a fixture that does not exist; the fixture is `tiny_model_dir`. Fixed the argument. The suite is now 27 passed / 6 skipped without weights and 33 passed with the real export, with 0 errors.
 
 **A decompression bomb became a 500.** A small file can decode to an enormous bitmap, and `Image.DecompressionBombError` escaped the 4xx handling. Fixed by mapping it to a 413 JSON response, with a test that feeds such a file.
 
@@ -157,7 +157,7 @@ The pattern in every case was the same: reproduce the smallest failing input, fi
 
 **Threads and systems.** `intra_op_num_threads=0` lets ORT use physical cores and enable affinity; an explicit value disables affinity. `inter_op_num_threads` only matters in `ORT_PARALLEL`, so the server keeps `ORT_SEQUENTIAL` with inter-op 1. One worker is a memory decision: each process loads about 1.4 GiB of weights, and one worker already peaks at 3.07 GiB. The bounded queue with an immediate 503 keeps memory flat under overload instead of letting requests accumulate; a fast refusal is a feature, not a failure. At c8 the p50 rises to 37.37 s, which is the honest cost of one inference worker and no batching.
 
-**Benchmarking.** A baseline before the first optimization is not optional; the missing single-graph number is the clearest gap in this log. Token parity is a stronger gate than a CER average when changing graphs, because it localizes a regression to a token. A local canary is not the organizer's score. Concurrency latency is not RPS: the table has no RPS because none was measured, and the throughput claim therefore remains untested. Isolating one change at a time was possible for prefill and impossible for the cache and graph split, and the journal says so rather than inventing a number.
+**Benchmarking.** A baseline before the first optimization is not optional; the missing single-graph number is the clearest gap in this log. Token parity is a stronger gate than a CER average when changing graphs, because it localizes a regression to a token. A local canary is not the organizer's score. Concurrency latency is not RPS: the table has no RPS because none was measured, and the throughput claim therefore remains untested. The load bench now reports `success_rate` and `sustained_rps`, where the rate counts successful requests only and a step scores zero below the challenge's 99% success threshold; that makes the tool match Step 2, but it does not turn the unmeasured claim into a measured one. Isolating one change at a time was possible for prefill and impossible for the cache and graph split, and the journal says so rather than inventing a number.
 
 ## 8. Resources consulted
 

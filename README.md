@@ -22,7 +22,7 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 | Export from pinned weights | verified: 5 graphs, **1,377.9 MiB**, `577 + 10 = 587` encoder length |
 | Token parity, old vs new graphs | **PASS**: 5/5 images token-identical (225/154/201/256/256) |
 | Prefill prefix | `start` matches `model.generate()`; `prompt`/`prompt_start` do not |
-| Unit + graph tests | **24 passed, 6 skipped** without weights; **30 passed** with a real export; 0 errors |
+| Unit + graph tests | **27 passed, 6 skipped** without weights; **33 passed** with a real export; 0 errors |
 | Server (v3 graphs) | ready in 6 s; OCR 6.7 s total on 12 threads; `VmHWM ≈ 3.07 GiB` |
 | Docker under `--memory=4g --cpus=4` | build and run verified: healthy in 4 s, OCR 10.3 s, 3.12 GiB / 4 GiB, torch absent |
 | Official accuracy vs organizer baseline | not available yet |
@@ -210,10 +210,10 @@ pytest tests -q
 MODEL_DIR=models pytest tests -q
 ```
 
-The stand-in-graph tests run without weights (24 passed, 6 skipped); with a real
-export the `needs_model` tests run too (30 passed). Bad input, decompression bombs,
-cache wiring, `pure_text` decoding, and EXIF-free preprocessing all have tests that
-need no weights.
+The stand-in-graph tests run without weights (27 passed, 6 skipped); with a real
+export the `needs_model` tests run too (33 passed). Bad input, decompression bombs,
+cache wiring, `pure_text` decoding, EXIF-free preprocessing, and the load-test
+percentile/sustained-rate math all have tests that need no weights.
 
 ## Measuring
 
@@ -221,7 +221,8 @@ need no weights.
 # accuracy against reference text, using the challenge's max(0, 1 - CER) rule
 python -m bench.accuracy --url http://localhost:8000 --images samples --refs refs.json
 
-# sequential p50/p95/p99, then concurrency sweep
+# sequential p50/p95/p99, then concurrency sweep; each step also reports
+# success_rate and sustained_rps (successes only, zero below 99% success)
 python -m bench.load --url http://localhost:8000 --images samples --mode all
 
 # old graphs vs new graphs, token by token
