@@ -22,9 +22,9 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 | Export from pinned weights | verified: 5 graphs, **1,377.9 MiB**, `577 + 10 = 587` encoder length |
 | Token parity, old vs new graphs | **PASS**: 5/5 images token-identical (225/154/201/256/256) |
 | Prefill prefix | `start` matches `model.generate()`; `prompt`/`prompt_start` do not |
-| Unit + graph tests | 25 pass, 1 error (a test fixture typo, see Known issues) |
+| Unit + graph tests | **24 passed, 6 skipped** without weights; **30 passed** with a real export; 0 errors |
 | Server (v3 graphs) | ready in 6 s; OCR 6.7 s total on 12 threads; `VmHWM ≈ 3.07 GiB` |
-| Docker under `--memory=4g` | previously verified end-to-end; current tree needs a Dockerfile fix (below) |
+| Docker under `--memory=4g --cpus=4` | build and run verified: healthy in 4 s, OCR 10.3 s, 3.12 GiB / 4 GiB, torch absent |
 | Official accuracy vs organizer baseline | not available yet |
 
 ## Build and run
@@ -43,8 +43,8 @@ curl -F "image=@samples/example.png" http://localhost:8000/ocr
 curl http://localhost:8000/health
 ```
 
-**Dockerfile caveat.** The exporter stage must install CPU PyTorch **and CPU
-torchvision together** from the CPU index, then `timm`/`einops`/`onnx`:
+**Build note.** The exporter stage installs CPU PyTorch **and CPU torchvision
+together** from the CPU index, then `timm`/`einops`/`onnx`:
 
 ```dockerfile
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision \
@@ -53,7 +53,8 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvisi
 ```
 
 Installing CPU `torch` alone lets `timm` pull a mismatched PyPI `torchvision`, and
-the export dies with `RuntimeError: operator torchvision::nms does not exist`.
+the export dies with `RuntimeError: operator torchvision::nms does not exist`. The
+pair has to come from the same index.
 
 ## How the model runs
 
@@ -123,6 +124,16 @@ but degraded text, not an obvious failure.
 cached cross-attention makes the values unused — only the mask length survives.
 Feeding a padded mask is the failure mode to avoid.
 
+**Decode like `pure_text`.** `<OCR>` is decoded with special tokens left in, then
+only the literal `<s>` and `</s>` strings are removed. Do not switch to
+`skip_special_tokens=True` or `.strip()`: that also drops special tokens in the
+middle of the text and whitespace the reference keeps. See `decode_pure_text` in
+`server/ocr_engine.py`.
+
+**No EXIF rotation.** `CLIPImageProcessor` does not rotate by EXIF, so the server
+does not either. Honouring the tag looks helpful but moves the pixels away from the
+reference the accuracy is measured against.
+
 ## Optimizations in the current build
 
 | Optimization | Where | Why |
@@ -136,6 +147,8 @@ Feeding a padded mask is the failure mode to avoid.
 | Stop at EOS | `server/ocr_engine.py` | most images finish well below the cap |
 | Bounded queue with immediate `503` | `server/app.py` | keeps memory flat under overload instead of OOMing |
 | Eager encoder-length check | `server/ocr_engine.py` | turns a mid-decode broadcast error into a clear startup failure |
+| `pure_text` decode matching the processor | `server/ocr_engine.py` | keeps the served text on the reference's post-processing path |
+| No EXIF rotation | `server/ocr_engine.py` | matches `CLIPImageProcessor` byte for byte |
 | Multi-stage build, torch-free runtime | `Dockerfile` | rule compliance, and a smaller image than a single-stage one |
 
 Tried and reverted: folding the embedding lookup into the step graph duplicated the
@@ -197,8 +210,10 @@ pytest tests -q
 MODEL_DIR=models pytest tests -q
 ```
 
-The stand-in-graph tests run without weights; the `needs_model` tests are skipped
-when `MODEL_DIR` is unset.
+The stand-in-graph tests run without weights (24 passed, 6 skipped); with a real
+export the `needs_model` tests run too (30 passed). Bad input, decompression bombs,
+cache wiring, `pure_text` decoding, and EXIF-free preprocessing all have tests that
+need no weights.
 
 ## Measuring
 
@@ -230,21 +245,29 @@ All on CPU, fp32, 12 ONNX Runtime threads unless stated otherwise.
 | Sequential latency (150 requests) | p50 7.21 s, p95 8.58 s, p99 13.25 s, 0 errors |
 | Concurrency 1/2/4/8 | p50 6.86 / 14.48 / 21.95 / 37.37 s, 0 errors or 503s |
 | Accuracy canary vs local references | mean 0.9413 (CER-scored, 5 images) |
-| Container under `--memory=4g --cpus=4` | healthy in ~6 s, `VmHWM ≈ 3.07 GiB`, no OOM (build before the prefill-mode change; parity confirms identical behaviour) |
+| Container under `--memory=4g --cpus=4` | healthy in 4 s; OCR 10.33 s (encoder 3.21 s, decode 7.12 s); 3.12 GiB / 4 GiB; `torch` and `torchvision` absent |
 
 The organizer's baseline is the authoritative accuracy reference; the local numbers
 above come from `model.generate()` on FUNSD and are a regression canary, not a
 score.
 
+## References
+
+* ONNX format, operators, and opsets: https://onnx.ai/onnx/
+* ONNX Runtime thread management: https://onnxruntime.ai/docs/performance/tune-performance/threading.html
+* ONNX Runtime quantization: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+* NVIDIA, "Mastering LLM Techniques: Inference Optimization": https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/
+* Florence-2 paper: https://arxiv.org/abs/2311.06242 · model card: https://huggingface.co/microsoft/Florence-2-base
+
 ## Known issues
 
-* `tests/test_pipeline.py::test_unknown_prefill_mode_fails_at_startup` asks for a
-  `model_dir` fixture that does not exist; the fixture is `tiny_model_dir`. One-word
-  fix, test currently errors at setup.
-* The Dockerfile exporter stage needs the CPU torchvision line shown above.
-* `runall.sh`'s parity grep looks for `ORT_OLD_vs_PT_OLD`, but `bench/parity.py`
-  prints `PT_vs_ORT_OLD` / `PT_vs_ORT_NEW`; those detail lines do not reach the
-  master log (the `PARITY` line still does).
+* Official accuracy against the organizer's baseline is not available; the local
+  `0.9413` canary is a regression signal, not a score.
+* RPS was not measured. The concurrency numbers above are p50 latency at a fixed
+  concurrency, not the throughput metric the challenge scores.
+* The challenge tests the latest commit on `main`. This work currently lives on
+  `challenge-hardening` / `firstproto` with a PR to `dev`, so `main` must be
+  fast-forwarded before submission.
 
 Numbers from every change, including the ones that were reverted, are in
 `journal.md`.
