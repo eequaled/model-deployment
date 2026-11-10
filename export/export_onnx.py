@@ -133,11 +133,9 @@ class Encoder(nn.Module):
 class Prefill(nn.Module):
     """First decoder pass: consumes the decoder prefix, returns logits and the full cache.
 
-    Only the last logits row is used -- the earlier rows are discarded -- but the
-    positions themselves are not free to drop: in a causal decoder the last position
-    attains its context from the positions before it, so serving one position against
-    a ten-position reference computes something else. bench/prefill_probe.py measures
-    whether that difference matters for this model, and meta.json records the answer.
+    In Florence-2 the 10-token task prompt goes into the encoder alongside the 577
+    image tokens; the decoder starts from a single decoder_start_token_id (</s> = 2),
+    which predicts <s> (0) and seeds the 1-position self-attention cache.
     """
 
     def __init__(self, language_model, layers):
@@ -145,11 +143,11 @@ class Prefill(nn.Module):
         self.language_model = language_model
         self.layers = layers
 
-    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_input_embeds):
+    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_inputs_embeds):
         out = self.language_model(
             encoder_outputs=BaseModelOutput(last_hidden_state=encoder_hidden_states),
             attention_mask=encoder_attention_mask,
-            decoder_inputs_embeds=decoder_input_embeds,
+            decoder_inputs_embeds=decoder_inputs_embeds,
             use_cache=True,
             return_dict=True,
         )
@@ -157,27 +155,24 @@ class Prefill(nn.Module):
 
 
 class Step(nn.Module):
-    """One cached decoding step: takes token ids, returns logits and 12 self-attention tensors.
+    """One cached decoding step: takes embedded token, returns logits and 12 self-attention tensors.
 
-    The embedding lookup lives *inside* this graph on purpose. Previously each token
-    cost two session calls -- embed the id, then run the decoder -- and the embedding
-    result crossed the Python boundary as a 768-float array. Folding the lookup in
-    removes one call and one allocation per generated token, and the tokenizer's ids
-    become the only thing Python has to hand over.
+    Keeping embed_tokens in its own 150.3 MiB session instead of folding it into the
+    step graph avoids duplicating the 51289x768 embedding matrix on disk and in RAM
+    (342.9 MiB vs 493.2 MiB under the 4 GB container limit).
     """
 
-    def __init__(self, language_model, embeddings, layers):
+    def __init__(self, language_model, layers):
         super().__init__()
         self.language_model = language_model
-        self.embeddings = embeddings
         self.layers = layers
 
-    def forward(self, encoder_hidden_states, encoder_attention_mask, input_ids, *past):
+    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_inputs_embeds, *past):
         cache = tuple(tuple(past[i * 4 + j] for j in range(4)) for i in range(self.layers))
         out = self.language_model(
             encoder_outputs=BaseModelOutput(last_hidden_state=encoder_hidden_states),
             attention_mask=encoder_attention_mask,
-            decoder_inputs_embeds=self.embeddings(input_ids),
+            decoder_inputs_embeds=decoder_inputs_embeds,
             past_key_values=cache,
             use_cache=True,
             return_dict=True,
@@ -188,7 +183,7 @@ class Step(nn.Module):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("/models"), help="where the graphs are written")
-    parser.add_argument("--prefill-mode", choices=PREFILL_MODES, default="prompt",
+    parser.add_argument("--prefill-mode", choices=PREFILL_MODES, default="start",
                         help="decoder prefix the prefill graph stands for (see PREFILL_MODES)")
     args = parser.parse_args()
     out: Path = args.out
@@ -287,12 +282,12 @@ def main() -> None:
         prefill,
         (encoder_inputs, encoder_mask, decoder_embeds),
         out / "decoder_prefill.onnx",
-        ["encoder_hidden_states", "encoder_attention_mask", "decoder_input_embeds"],
+        ["encoder_hidden_states", "encoder_attention_mask", "decoder_inputs_embeds"],
         prefill_names,
         {
             "encoder_hidden_states": {1: "encoder_sequence_length"},
             "encoder_attention_mask": {1: "encoder_sequence_length"},
-            "decoder_input_embeds": {1: "decoder_sequence_length"},
+            "decoder_inputs_embeds": {1: "decoder_sequence_length"},
             "logits": {1: "decoder_sequence_length"},
             **{
                 name: {2: "decoder_sequence_length" if "decoder" in name else "encoder_sequence_length"}
@@ -301,8 +296,9 @@ def main() -> None:
         },
     )
 
-    step = Step(language_model, embeddings, layers).eval()
-    step_inputs = ["encoder_hidden_states", "encoder_attention_mask", "input_ids"] + [
+    step = Step(language_model, layers).eval()
+    step_embeds = torch.randn(1, 1, d_model, generator=generator)
+    step_inputs = ["encoder_hidden_states", "encoder_attention_mask", "decoder_inputs_embeds"] + [
         f"past_key_values.{i}.{name}" for i in range(layers) for name in SLOTS
     ]
     step_outputs = ["logits"] + [
@@ -310,13 +306,13 @@ def main() -> None:
     ]
     export(
         step,
-        (encoder_inputs, encoder_mask, torch.zeros(1, 1, dtype=torch.long), *past),
+        (encoder_inputs, encoder_mask, step_embeds, *past),
         out / "decoder_step.onnx",
         step_inputs,
         step_outputs,
         {
             "encoder_attention_mask": {1: "encoder_sequence_length"},
-            "input_ids": {1: "decoder_sequence_length"},
+            "decoder_inputs_embeds": {1: "decoder_sequence_length"},
             "logits": {1: "decoder_sequence_length"},
             **{
                 name: {

@@ -93,11 +93,11 @@ def build_tiny_model(directory: Path) -> Path:
         [
             tensor_info("encoder_hidden_states", [1, "encoder_sequence_length", 768]),
             tensor_info("encoder_attention_mask", [1, "encoder_sequence_length"]),
-            tensor_info("decoder_input_embeds", [1, "decoder_sequence_length", 768]),
+            tensor_info("decoder_inputs_embeds", [1, "decoder_sequence_length", 768]),
         ],
         [tensor_info("logits", [1, "decoder_sequence_length", VOCAB])]
         + [cache_info(name) for name in prefill_outputs[1:]],
-        [helper.make_node("MatMul", ["decoder_input_embeds", "w"], ["logits"])]
+        [helper.make_node("MatMul", ["decoder_inputs_embeds", "w"], ["logits"])]
         + [helper.make_node("Unsqueeze", ["encoder_hidden_states", "axes"], ["hs4"])]
         + [helper.make_node("Mul", ["hs4", "one"], [name]) for name in prefill_outputs[1:]],
         [
@@ -115,14 +115,12 @@ def build_tiny_model(directory: Path) -> Path:
         "decoder_step",
         [
             tensor_info("encoder_attention_mask", [1, "encoder_sequence_length"]),
-            helper.make_tensor_value_info("input_ids", TensorProto.INT64, [1, "decoder_sequence_length"]),
+            tensor_info("decoder_inputs_embeds", [1, "decoder_sequence_length", 768]),
         ]
         + [cache_info(f"past_key_values.{i}.{s}") for i in range(LAYERS) for s in slots],
         [tensor_info("logits", [1, "decoder_sequence_length", VOCAB])]
         + [cache_info(name) for name in step_outputs[1:]],
-        # embedding lookup happens inside the step graph
-        [helper.make_node("Gather", ["table", "input_ids"], ["step_embeds"], axis=0),
-         helper.make_node("MatMul", ["step_embeds", "w2"], ["logits"])]
+        [helper.make_node("MatMul", ["decoder_inputs_embeds", "w2"], ["logits"])]
         + [
             helper.make_node(
                 "Add", [f"past_key_values.{i}.{slot}", "zero"], [f"present.{i}.{slot}"]
@@ -132,7 +130,6 @@ def build_tiny_model(directory: Path) -> Path:
         ],
         [
             helper.make_tensor("w2", TensorProto.FLOAT, [768, VOCAB], weights),
-            helper.make_tensor("table", TensorProto.FLOAT, [VOCAB, 768], embedding_table),
             helper.make_tensor("zero", TensorProto.FLOAT, [1], [0.0]),
         ],
     )

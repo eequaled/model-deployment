@@ -121,9 +121,9 @@ print("cuda", torch.version.cuda)'
 
   # 0. decisions that change what the numbers mean -------------------------
   run decide "$LOG_DIR/decide.log" python bench/prefill_probe.py --json-out "$LOG_DIR/decide.json"
-  PREFILL_MODE="${PREFILL_MODE:-prompt}"
+  PREFILL_MODE="${PREFILL_MODE:-start}"
   if [ -f "$LOG_DIR/decide.json" ]; then
-    PREFILL_MODE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("best_prefix","prompt"))' "$LOG_DIR/decide.json" 2>/dev/null || echo prompt)"
+    PREFILL_MODE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("best_prefix","start"))' "$LOG_DIR/decide.json" 2>/dev/null || echo start)"
   fi
   if [ -f "$LOG_DIR/decide.log" ]; then
     grep -E "^(PREFIX|ONE_POSITION|ACTION)" "$LOG_DIR/decide.log" >>"$MASTER" 2>/dev/null

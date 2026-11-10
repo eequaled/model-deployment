@@ -18,7 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 
 # CPU wheels only: the challenge forbids a GPU at every stage, including export.
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch \
-    && pip install "transformers==4.48.3" "safetensors" "pillow" "numpy" "huggingface_hub"
+    && pip install "transformers==4.48.3" "onnx==1.17.0" "safetensors" \
+       "pillow" "numpy" "huggingface_hub" "timm" "einops"
 
 WORKDIR /build
 COPY export/export_onnx.py export/export_onnx.py

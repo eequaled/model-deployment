@@ -36,7 +36,7 @@ class Pipeline:
         self.prompt_ids = np.asarray(self.meta["prompt_ids"], dtype=np.int64)[None, :]
         self.start_ids = np.asarray([[int(self.meta["decoder_start_token_id"])]], dtype=np.int64)
         self.eos = int(self.meta["eos_token_id"])
-        self.prefill_mode = str(self.meta.get("prefill_mode", "prompt"))
+        self.prefill_mode = str(self.meta.get("prefill_mode", "start"))
         options = ort.SessionOptions()
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
@@ -56,8 +56,12 @@ class Pipeline:
         self.step_in = [i.name for i in self.sessions["decoder_step"].get_inputs()]
         self.step_out = [o.name for o in self.sessions["decoder_step"].get_outputs()]
         self.prefill_embeds_input = next(
-            (n for n in ("decoder_input_embeds", "decoder_inputs_embeds") if n in self.prefill_in),
-            "decoder_input_embeds",
+            (n for n in ("decoder_inputs_embeds", "decoder_input_embeds") if n in self.prefill_in),
+            "decoder_inputs_embeds",
+        )
+        self.step_embeds_input = next(
+            (n for n in ("decoder_inputs_embeds", "decoder_input_embeds") if n in self.step_in),
+            "decoder_inputs_embeds",
         )
         self.layout = "ids" if "input_ids" in self.step_in else "embeds"
 
@@ -105,7 +109,7 @@ class Pipeline:
             if self.layout == "ids":
                 step_feed["input_ids"] = np.array([[tokens[-1]]], dtype=np.int64)
             else:
-                step_feed["decoder_inputs_embeds"] = s["embed_tokens"].run(
+                step_feed[self.step_embeds_input] = s["embed_tokens"].run(
                     None, {"input_ids": np.array([[tokens[-1]]], dtype=np.int64)}
                 )[0]
             for name in self.step_in:

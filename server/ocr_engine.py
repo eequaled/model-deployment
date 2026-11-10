@@ -54,7 +54,7 @@ class FlorenceOCR:
         self.eos_id = int(self.meta["eos_token_id"])
         self.layers = int(self.meta["decoder_layers"])
         self.max_new_tokens = max_new_tokens or int(self.meta["max_new_tokens"])
-        self.prefill_mode = prefill_mode or str(self.meta.get("prefill_mode", "prompt"))
+        self.prefill_mode = prefill_mode or str(self.meta.get("prefill_mode", "start"))
         if self.prefill_mode not in PREFILL_MODES:
             raise RuntimeError(
                 f"unknown prefill_mode {self.prefill_mode!r}; expected one of {PREFILL_MODES}"
@@ -70,9 +70,14 @@ class FlorenceOCR:
         # The graph may name its embedding input either way depending on the export; take
         # whichever the file declares instead of guessing and failing at request time.
         self.prefill_embeds_input = next(
-            (name for name in ("decoder_input_embeds", "decoder_inputs_embeds")
+            (name for name in ("decoder_inputs_embeds", "decoder_input_embeds")
              if name in self.prefill_inputs),
-            "decoder_input_embeds",
+            "decoder_inputs_embeds",
+        )
+        self.step_embeds_input = next(
+            (name for name in ("decoder_inputs_embeds", "decoder_input_embeds")
+             if name in self.step_inputs),
+            "",
         )
         self._check_cache_contract()
 
@@ -120,7 +125,13 @@ class FlorenceOCR:
         present = [name for name in self.prefill_outputs if name.startswith("present.")]
         past = [name for name in self.step_inputs if name.startswith("past_key_values.")]
         returned = [name for name in self.step_outputs if name.startswith("present.")]
-        known = {"input_ids", "encoder_attention_mask", "encoder_hidden_states"}
+        known = {
+            "input_ids",
+            "decoder_inputs_embeds",
+            "decoder_input_embeds",
+            "encoder_attention_mask",
+            "encoder_hidden_states",
+        }
         unknown = [n for n in self.step_inputs if not n.startswith("past_key_values.") and n not in known]
         problems = [
             f"prefill emits {len(present)} present tensors, expected {4 * self.layers}",
@@ -174,10 +185,12 @@ class FlorenceOCR:
     def step_feed(self, mask: np.ndarray, token: int, cache: dict[str, np.ndarray],
                   encoder_states: np.ndarray) -> dict[str, np.ndarray]:
         """Everything the step graph declares, keyed by the names it declared."""
-        feed = {
-            "encoder_attention_mask": mask,
-            "input_ids": np.array([[token]], dtype=np.int64),
-        }
+        token_ids = np.array([[token]], dtype=np.int64)
+        feed: dict[str, np.ndarray] = {"encoder_attention_mask": mask}
+        if self.step_embeds_input:
+            feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
+        if "input_ids" in self.step_inputs:
+            feed["input_ids"] = token_ids
         if "encoder_hidden_states" in self.step_inputs:
             # Tracing normally drops this input, because the cached cross-attention makes
             # the values unused. When it survives, the values still do not matter -- only
