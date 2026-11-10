@@ -120,6 +120,12 @@ async def ocr(request: Request, image: UploadFile | None = File(default=None)) -
     async with state.slots:
         try:
             text, timings = await _infer(payload)
+        except Image.DecompressionBombError as exc:
+            # A small file can still decode to an enormous bitmap. That is bad
+            # input, not a server fault: refuse it before it costs us the heap.
+            return JSONResponse(
+                {"error": f"image exceeds the safe pixel limit: {exc}"}, status_code=413
+            )
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             return JSONResponse({"error": f"not a readable image: {exc}"}, status_code=400)
         except Exception:  # never let one bad request kill the worker

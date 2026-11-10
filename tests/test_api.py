@@ -87,3 +87,20 @@ def test_oversized_upload_is_413(client, monkeypatch):
     monkeypatch.setattr(app_module, "MAX_UPLOAD", 1024)
     response = test_client.post("/ocr", files={"image": ("big.png", png_bytes((512, 512)), "image/png")})
     assert response.status_code == 413
+
+
+def test_decompression_bomb_is_a_json_413(client, monkeypatch):
+    test_client, stub = client
+    payload = png_bytes()
+
+    def bomb(*args, **kwargs):
+        raise Image.DecompressionBombError("too many pixels")
+
+    monkeypatch.setattr(app_module.Image, "open", bomb)
+    response = test_client.post("/ocr", files={"image": ("bomb.png", payload, "image/png")})
+    assert response.status_code == 413
+    body = response.json()
+    assert "error" in body and "pixel" in body["error"]
+    assert stub.seen == []  # rejected before inference
+    # the server is still healthy afterwards
+    assert test_client.get("/health").status_code == 200
