@@ -13,6 +13,9 @@ Two details matter more than they look:
 * Encoder length. The step graph broadcasts its attention mask against the cached
   cross-attention tensors, so mask length must equal the prefill encoder length
   exactly. A mismatch is a hard runtime error, not a silent drift.
+* Prefill is one position. In a causal decoder only the last prompt position can
+  predict the next token, so prefill runs once on that position and keeps its logits.
+  Running all ten and slicing would cost ten times the compute for the same answer.
 """
 
 from __future__ import annotations
@@ -42,12 +45,14 @@ class FlorenceOCR:
         self.rescale = float(self.meta["rescale_factor"])
         self.prompt_ids = np.asarray(self.meta["prompt_ids"], dtype=np.int64)[None, :]
         self.start_id = int(self.meta["decoder_start_token_id"])
+        # Florence-2 is Bart-like: generation starts from the end-of-sequence id, but
+        # the prefill position is the *final prompt token*, whose hidden state has
+        # already attended to everything before it. Embedded prompt vectors already
+        # exist, so no separate start-token lookup is needed at all.
         self.eos_id = int(self.meta["eos_token_id"])
         self.layers = int(self.meta["decoder_layers"])
         self.max_new_tokens = max_new_tokens or int(self.meta["max_new_tokens"])
 
-        # One encoder length per request is enough because the OCR prompt is fixed,
-        # but it is read from the graphs rather than hardcoded.
         self.threads = threads
         self.sessions = self._load_sessions()
         self.prefill_outputs = [o.name for o in self.sessions["decoder_prefill"].get_outputs()]
@@ -62,6 +67,8 @@ class FlorenceOCR:
                     f"vision encoder emits {declared} image tokens but meta.json says {expected}; "
                     "the graphs and meta.json came from different runs"
                 )
+        if self.meta.get("cache_layout", "self_and_cross") != "self_and_cross":
+            raise RuntimeError(f"unsupported cache layout {self.meta['cache_layout']!r}")
 
     def _load_sessions(self) -> dict[str, ort.InferenceSession]:
         options = ort.SessionOptions()
@@ -130,24 +137,27 @@ class FlorenceOCR:
         encoder_states = self._run("encoder_model", {"inputs_embeds": merged, "attention_mask": mask})[0]
         prefill_at = time.perf_counter()
 
-        start_ids = np.array([[self.start_id]], dtype=np.int64)
-        start_embeds = self._run("embed_tokens", {"input_ids": start_ids})[0]
+        # Only the final prompt position: its hidden state is the one that predicts
+        # the first generated token (see the module docstring).
+        last_prompt_embeds = prompt_embeds[:, -1:, :]
         outputs = self._run(
             "decoder_prefill",
             {
                 "encoder_hidden_states": encoder_states,
                 "encoder_attention_mask": mask,
-                "decoder_inputs_embeds": start_embeds,
+                "decoder_input_embeds": last_prompt_embeds,
             },
         )
         cache = dict(zip(self.prefill_outputs[1:], outputs[1:]))
         tokens = [int(outputs[0][0, -1].argmax())]
 
         while tokens[-1] != self.eos_id and len(tokens) < self.max_new_tokens:
-            embeds = self._run(
-                "embed_tokens", {"input_ids": np.array([[tokens[-1]]], dtype=np.int64)}
-            )[0]
-            feed = {"encoder_attention_mask": mask, "decoder_inputs_embeds": embeds}
+            # The embedding lookup happens inside the step graph now, so this is a
+            # token id rather than a 768-float tensor.
+            feed = {
+                "encoder_attention_mask": mask,
+                "input_ids": np.array([[tokens[-1]]], dtype=np.int64),
+            }
             for name in self.step_inputs:
                 if name.startswith("past_key_values."):
                     slot = name[len("past_key_values."):]

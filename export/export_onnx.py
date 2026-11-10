@@ -107,18 +107,25 @@ class Encoder(nn.Module):
 
 
 class Prefill(nn.Module):
-    """First decoder pass: consumes encoder states, returns logits and full cache."""
+    """First decoder pass: consumes the last prompt token, returns logits and full cache.
+
+    Note what is *not* an input: the decoder's own history. Prefill is only ever
+    called on the final prompt position, because the earlier prompt tokens cannot
+    influence the next token in a causal decoder beyond what it already attends to.
+    Encoding 10 positions and discarding 9 logit rows costs 10x the compute for the
+    same answer, so the graph takes one position and the server keeps only its logits.
+    """
 
     def __init__(self, language_model, layers):
         super().__init__()
         self.language_model = language_model
         self.layers = layers
 
-    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_inputs_embeds):
+    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_input_embeds):
         out = self.language_model(
             encoder_outputs=BaseModelOutput(last_hidden_state=encoder_hidden_states),
             attention_mask=encoder_attention_mask,
-            decoder_inputs_embeds=decoder_inputs_embeds,
+            decoder_inputs_embeds=decoder_input_embeds,
             use_cache=True,
             return_dict=True,
         )
@@ -126,19 +133,27 @@ class Prefill(nn.Module):
 
 
 class Step(nn.Module):
-    """One cached decoding step: returns logits and the 12 self-attention tensors."""
+    """One cached decoding step: takes token ids, returns logits and 12 self-attention tensors.
 
-    def __init__(self, language_model, layers):
+    The embedding lookup lives *inside* this graph on purpose. Previously each token
+    cost two session calls -- embed the id, then run the decoder -- and the embedding
+    result crossed the Python boundary as a 768-float array. Folding the lookup in
+    removes one call and one allocation per generated token, and the tokenizer's ids
+    become the only thing Python has to hand over.
+    """
+
+    def __init__(self, language_model, embeddings, layers):
         super().__init__()
         self.language_model = language_model
+        self.embeddings = embeddings
         self.layers = layers
 
-    def forward(self, encoder_hidden_states, encoder_attention_mask, decoder_inputs_embeds, *past):
+    def forward(self, encoder_hidden_states, encoder_attention_mask, input_ids, *past):
         cache = tuple(tuple(past[i * 4 + j] for j in range(4)) for i in range(self.layers))
         out = self.language_model(
             encoder_outputs=BaseModelOutput(last_hidden_state=encoder_hidden_states),
             attention_mask=encoder_attention_mask,
-            decoder_inputs_embeds=decoder_inputs_embeds,
+            decoder_inputs_embeds=self.embeddings(input_ids),
             past_key_values=cache,
             use_cache=True,
             return_dict=True,
@@ -230,6 +245,7 @@ def main() -> None:
         },
     )
 
+    # Prefill sees exactly one decoder position: the last prompt token.
     decoder_embeds = torch.randn(1, 1, d_model, generator=generator)
     prefill = Prefill(language_model, layers).eval()
     past_len = 6
@@ -243,14 +259,12 @@ def main() -> None:
         prefill,
         (encoder_inputs, encoder_mask, decoder_embeds),
         out / "decoder_prefill.onnx",
-        ["encoder_hidden_states", "encoder_attention_mask", "decoder_inputs_embeds"] + [
-            f"past_key_values.{i}.{name}" for i in range(layers) for name in SLOTS
-        ],
+        ["encoder_hidden_states", "encoder_attention_mask", "decoder_input_embeds"],
         prefill_names,
         {
             "encoder_hidden_states": {1: "encoder_sequence_length"},
             "encoder_attention_mask": {1: "encoder_sequence_length"},
-            "decoder_inputs_embeds": {1: "decoder_sequence_length"},
+            "decoder_input_embeds": {1: "decoder_sequence_length"},
             "logits": {1: "decoder_sequence_length"},
             **{
                 name: {2: "decoder_sequence_length" if "decoder" in name else "encoder_sequence_length"}
@@ -259,8 +273,8 @@ def main() -> None:
         },
     )
 
-    step = Step(language_model, layers).eval()
-    step_inputs = ["encoder_hidden_states", "encoder_attention_mask", "decoder_inputs_embeds"] + [
+    step = Step(language_model, embeddings, layers).eval()
+    step_inputs = ["encoder_hidden_states", "encoder_attention_mask", "input_ids"] + [
         f"past_key_values.{i}.{name}" for i in range(layers) for name in SLOTS
     ]
     step_outputs = ["logits"] + [
@@ -268,14 +282,13 @@ def main() -> None:
     ]
     export(
         step,
-        (encoder_inputs, encoder_mask, decoder_embeds, *past),
+        (encoder_inputs, encoder_mask, torch.zeros(1, 1, dtype=torch.long), *past),
         out / "decoder_step.onnx",
         step_inputs,
         step_outputs,
         {
-            "encoder_hidden_states": {1: "encoder_sequence_length"},
             "encoder_attention_mask": {1: "encoder_sequence_length"},
-            "decoder_inputs_embeds": {1: "decoder_sequence_length"},
+            "input_ids": {1: "decoder_sequence_length"},
             "logits": {1: "decoder_sequence_length"},
             **{
                 name: {

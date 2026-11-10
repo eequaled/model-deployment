@@ -36,7 +36,7 @@ Five graphs, because the pieces have genuinely different lifetimes:
 | `embed_tokens.onnx` | once per prompt, once per token | a 51k×768 lookup is cheaper as its own graph than folded into decoding |
 | `encoder_model.onnx` | once per request | fuses the 577 image tokens with the 10 prompt tokens |
 | `decoder_prefill.onnx` | once per request | returns logits plus the whole attention cache |
-| `decoder_step.onnx` | once per token | returns logits plus 12 updated self-attention tensors |
+| `decoder_step.onnx` | once per token | takes token ids, returns logits plus 12 updated self-attention tensors |
 
 The cross-attention key/value tensors are built in prefill and reused unchanged for
 the entire request, which is why the step graph accepts 24 cached tensors and
@@ -45,6 +45,12 @@ returns only 12: it has nothing new to say about the image.
 Decoding is greedy (`argmax`) with a cap of `MAX_NEW_TOKENS` (default 256, from
 `meta.json`) and stops at EOS. Greedy is deliberate: the reference is the fp32
 original, and sampling would add variance without improving CER.
+
+Prefill runs on **one** decoder position, not ten. In a causal decoder only the last
+prompt position can predict the next token, and its hidden state has already
+attended to everything before it, so encoding ten positions and keeping one row of
+logits buys nothing. This is the same trick TensorRT-LLM and vLLM use: a prefill
+that outputs one set of logits and a KV cache, then a token-at-a-time decode loop.
 
 ## Things that are easy to get wrong
 
@@ -56,10 +62,44 @@ server loads them and never tokenizes the tag itself.
 mask against the cached cross-attention tensors, so a mask of the wrong length is a
 hard error. With a constant OCR prompt this is 577 image tokens + 10 prompt tokens.
 
+**Prefill position.** The prefill graph expects the embedding of the *last prompt
+token* (`decoder_input_embeds`, shape `(1,1,768)`). The server slices it from the
+prompt embeddings it already computed.
+
 **Preprocessing must match exactly.** Resize to 768×768 with bicubic resampling,
 rescale to [0, 1], normalize with ImageNet mean/std, arrange as CHW float32. A
 different resampling filter or a different channel order produces plausible-looking
 but degraded text, not an obvious failure.
+
+## Optimizations in the current build
+
+Each is a deliberate choice with a stated reason; the measured effect of each lives
+in `journal.md`, because that is where the before/after numbers are kept.
+
+| Optimization | Where | Why |
+|---|---|---|
+| Prefill on one position, not the whole prompt | `server/ocr_engine.py` | 10x less decoder compute for an identical next token |
+| Embedding lookup folded into the step graph | `export/export_onnx.py` | one session call and one array allocation less per token |
+| Split graphs with per-graph ORT optimization | `export/`, `server/ocr_engine.py` | ORT optimizes each graph for the shapes it actually sees |
+| Cached decoding, cross-attention computed once | graph I/O contract | avoids recomputing 587 positions of cross-attention per token |
+| Oracle-free prompt ids (`meta.json`) | `export/export_onnx.py` | removes per-request tokenization and a whole class of silent error |
+| Greedy `argmax`, no beam | `server/ocr_engine.py` | matches the fp32 baseline; beam search would diverge from it |
+| Stop at EOS | `server/ocr_engine.py` | most images finish well below the cap |
+| Bounded queue with immediate `503` | `server/app.py` | keeps memory flat under overload instead of OOMing |
+| Eager encoder-length check | `server/ocr_engine.py` | turns a mid-decode broadcast error into a clear startup failure |
+| Multi-stage build, torch-free runtime | `Dockerfile` | rule compliance, and a smaller image than a single-stage one |
+
+Not adopted, with reasons:
+
+| Idea | Why not |
+|---|---|
+| Dynamic INT8 on the language graphs | token drift (7/64 and 9/64 agreement on two images); accuracy floor is absolute |
+| INT8 on the vision tower | `ConvInteger` on DaViT convs is not supported by the CPU EP here, and it fails to load |
+| Beam search | the reference is greedy; different tokens means worse CER |
+| Batching | no batch axis in the graphs; would cost every request to help only under load, and memory is tight |
+| Cross-request KV reuse | the rules forbid response caching; every request must run inference |
+| `OpenMP`/`OMP_NUM_THREADS` tuning | ONNX Runtime's intra-op pool governs this, so tune `ORT_THREADS` instead |
+| Multiple uvicorn workers | each process loads its own ~1.4 GiB of weights; measure `VmHWM` before trying two |
 
 ## Configuration
 
