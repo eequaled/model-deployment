@@ -16,7 +16,6 @@ import json
 import statistics
 import threading
 import time
-import urllib.error
 from pathlib import Path
 
 from .accuracy import IMAGE_SUFFIXES, post_image
@@ -31,13 +30,27 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def summarize(name: str, latencies: list[float], errors: int, elapsed: float) -> dict:
+    """One row per step, in the shape the challenge scores.
+
+    `rps` counts successful requests only. `sustained_rps` applies the Step 2 rule:
+    the rate only counts for a step if at least 99% of that step's requests
+    succeeded, so a step that is mostly 503s or timeouts scores zero rather than a
+    flattering attempt rate.
+    """
+    ok = len(latencies)
+    requests = ok + errors
+    success_rate = ok / requests if requests else 0.0
+    rps = ok / elapsed if elapsed else 0.0
     row = {
         "mode": name,
-        "requests": len(latencies) + errors,
-        "ok": len(latencies),
+        "requests": requests,
+        "ok": ok,
         "errors": errors,
+        "success_rate": round(success_rate, 4),
         "wall_s": round(elapsed, 2),
-        "rps": round((len(latencies) + errors) / elapsed, 3) if elapsed else 0.0,
+        "rps": round(rps, 3),
+        "attempted_rps": round(requests / elapsed, 3) if elapsed else 0.0,
+        "sustained_rps": round(rps, 3) if success_rate >= 0.99 else 0.0,
         "p50_ms": round(1000 * percentile(latencies, 0.50), 1),
         "p95_ms": round(1000 * percentile(latencies, 0.95), 1),
         "p99_ms": round(1000 * percentile(latencies, 0.99), 1),
@@ -58,7 +71,7 @@ def sequential(url: str, images: list[Path], repeats: int, timeout: float) -> di
             try:
                 post_image(url, image, timeout)
                 latencies.append(time.perf_counter() - t0)
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except Exception as exc:  # a 503, a timeout, or a malformed body
                 errors += 1
                 print("error:", exc)
     return summarize("latency", latencies, errors, time.perf_counter() - started)
@@ -81,7 +94,7 @@ def concurrent(url: str, images: list[Path], clients: int, seconds: float, timeo
                 post_image(url, image, timeout)
                 with lock:
                     latencies.append(time.perf_counter() - t0)
-            except (urllib.error.URLError, TimeoutError):
+            except Exception:  # never let one bad response kill a load worker
                 with lock:
                     errors += 1
 
