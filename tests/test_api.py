@@ -75,10 +75,11 @@ def test_empty_upload_is_rejected(client):
     assert response.status_code == 400
 
 
-def test_missing_field_is_a_4xx(client):
+def test_missing_field_is_a_json_400(client):
     test_client, _ = client
     response = test_client.post("/ocr")
-    assert 400 <= response.status_code < 500
+    assert response.status_code == 400
+    assert "error" in response.json()
 
 
 def test_oversized_upload_is_413(client, monkeypatch):

@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
 
@@ -94,9 +94,17 @@ async def _infer(payload: bytes) -> tuple[str, dict[str, float]]:
 
 
 @app.post("/ocr")
-async def ocr(image: UploadFile = File(...)) -> JSONResponse:
+async def ocr(request: Request, image: UploadFile | None = File(default=None)) -> JSONResponse:
     if state.engine is None or state.slots is None:
         return JSONResponse({"error": "model not loaded"}, status_code=503)
+    if image is None:
+        return JSONResponse({"error": "expected multipart field 'image'"}, status_code=400)
+
+    # Reject oversized bodies from the declared header before reading them, so a
+    # 500 MB upload never becomes 500 MB of resident memory.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD + 4096:
+        return JSONResponse({"error": f"upload exceeds {MAX_UPLOAD} bytes"}, status_code=413)
 
     payload = await image.read(MAX_UPLOAD + 1)
     if not payload:

@@ -304,6 +304,10 @@ def main() -> None:
         "prompt_text": prompt_text,
         "prompt_ids": prompt_ids,
         "image_tokens": int(image_tokens),
+        # 577 image tokens + 10 prompt tokens. Recorded so the server can reject a
+        # mask/graph mismatch with one clear message instead of a broadcast error
+        # partway through decoding.
+        "encoder_length": int(encoder_len),
         "decoder_start_token_id": int(start_id),
         "eos_token_id": int(processor.tokenizer.eos_token_id),
         "pad_token_id": int(processor.tokenizer.pad_token_id),

@@ -54,6 +54,15 @@ class FlorenceOCR:
         self.step_inputs = [i.name for i in self.sessions["decoder_step"].get_inputs()]
         self.step_outputs = [o.name for o in self.sessions["decoder_step"].get_outputs()]
 
+        expected = self.meta.get("image_tokens")
+        if expected is not None:
+            declared = self.image_tokens_from_graph()
+            if declared != int(expected):
+                raise RuntimeError(
+                    f"vision encoder emits {declared} image tokens but meta.json says {expected}; "
+                    "the graphs and meta.json came from different runs"
+                )
+
     def _load_sessions(self) -> dict[str, ort.InferenceSession]:
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -93,6 +102,13 @@ class FlorenceOCR:
     def _run(self, name: str, feed: dict[str, np.ndarray]) -> list[np.ndarray]:
         return self.sessions[name].run(None, feed)
 
+    def image_tokens_from_graph(self) -> int:
+        """Read the vision output length from the graph instead of assuming 577."""
+        shape = self.sessions["vision_encoder"].get_outputs()[0].shape
+        if len(shape) == 3 and isinstance(shape[1], int):
+            return shape[1]
+        return -1
+
     def generate(self, image) -> tuple[str, dict[str, float]]:
         started = time.perf_counter()
         pixel_values = self.preprocess(image)
@@ -101,6 +117,15 @@ class FlorenceOCR:
         prompt_embeds = self._run("embed_tokens", {"input_ids": self.prompt_ids})[0]
         merged = np.concatenate([image_features, prompt_embeds], axis=1).astype(np.float32)
         encoder_length = merged.shape[1]
+        # The step graph broadcasts this mask against the cached cross-attention
+        # tensors. Check here so a mismatch is one clear error rather than a
+        # broadcast failure a hundred tokens into decoding.
+        expected = int(self.meta.get("encoder_length") or 0)
+        if expected and encoder_length != expected:
+            raise RuntimeError(
+                f"encoder length {encoder_length} does not match meta.json ({expected}); "
+                "check the prompt ids and the vision graph"
+            )
         mask = np.ones((1, encoder_length), dtype=np.float32)
         encoder_states = self._run("encoder_model", {"inputs_embeds": merged, "attention_mask": mask})[0]
         prefill_at = time.perf_counter()

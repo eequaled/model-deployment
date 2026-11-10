@@ -215,6 +215,17 @@ def test_preprocessing_handles_awkward_images(engine):
         assert np.isfinite(array).all()
 
 
+def test_encoder_length_mismatch_fails_loudly(engine, monkeypatch):
+    """A wrong-length mask must raise, not surface as a broadcast error mid-decode."""
+    monkeypatch.setitem(engine.meta, "encoder_length", IMAGE_TOKENS + len(PROMPT_IDS) + 3)
+    with pytest.raises(RuntimeError, match="encoder length"):
+        engine.generate(Image.new("RGB", (64, 64), (0, 0, 0)))
+
+
+def test_image_token_count_is_read_from_the_graph(engine):
+    assert engine.image_tokens_from_graph() == IMAGE_TOKENS
+
+
 def test_generate_stops_at_token_cap(engine, monkeypatch):
     monkeypatch.setattr(engine, "max_new_tokens", 3)
     text, _ = engine.generate(Image.new("RGB", (64, 64), (0, 0, 0)))
