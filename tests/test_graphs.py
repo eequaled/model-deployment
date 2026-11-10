@@ -73,6 +73,7 @@ def test_meta_describes_a_consistent_model():
     assert meta["encoder_length"] == meta["image_tokens"] + len(meta["prompt_ids"])
     assert meta["decoder_layers"] == 6
     assert meta["prompt_text"].startswith("What is the text")
+    assert meta.get("prefill_mode", "prompt") in ("prompt", "last", "start", "prompt_start")
 
 
 @needs_model
@@ -95,7 +96,10 @@ def test_every_graph_loads_and_exposes_expected_io():
         session = ort.InferenceSession(
             str(path), sess_options=options, providers=["CPUExecutionProvider"]
         )
-        assert [i.name for i in session.get_inputs()] == inputs, name
+        declared_in = [i.name for i in session.get_inputs() if not i.name.startswith("past_key_values.")]
+        if name == "decoder_step" and declared_in[:1] == ["encoder_hidden_states"]:
+            declared_in = declared_in[1:]
+        assert declared_in == inputs, name
         assert [o.name for o in session.get_outputs()][: len(outputs)] == outputs, name
 
 

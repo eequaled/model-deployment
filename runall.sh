@@ -120,21 +120,26 @@ print("cuda", torch.version.cuda)'
   say versions "PASS (log: $LOG_DIR/versions.log)"
 
   # 0. decisions that change what the numbers mean -------------------------
-  run decide "$LOG_DIR/decide.log" python bench/prefill_probe.py
+  run decide "$LOG_DIR/decide.log" python bench/prefill_probe.py --json-out "$LOG_DIR/decide.json"
+  PREFILL_MODE="${PREFILL_MODE:-prompt}"
+  if [ -f "$LOG_DIR/decide.json" ]; then
+    PREFILL_MODE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1])).get("best_prefix","prompt"))' "$LOG_DIR/decide.json" 2>/dev/null || echo prompt)"
+  fi
   if [ -f "$LOG_DIR/decide.log" ]; then
-    grep -E "old_and_new_agree|SAFE|UNSAFE" "$LOG_DIR/decide.log" >>"$MASTER" 2>/dev/null
+    grep -E "^(PREFIX|ONE_POSITION|ACTION)" "$LOG_DIR/decide.log" >>"$MASTER" 2>/dev/null
   fi
 
   # 1. export from the original weights ------------------------------------
-  run export "$LOG_DIR/export.log" python export/export_onnx.py --out "$NEW"
+  run export "$LOG_DIR/export.log" python export/export_onnx.py --out "$NEW" --prefill-mode "$PREFILL_MODE"
   if [ -f "$NEW/meta.json" ]; then
     cp "$NEW/meta.json" "$LOG_DIR/meta.json"
     python - "$NEW/meta.json" >>"$MASTER" 2>&1 <<'PY'
 import json, sys
 meta = json.load(open(sys.argv[1]))
-print("meta: image_tokens=%s prompt_len=%s encoder_length=%s layers=%s max_new=%s" % (
+print("meta: image_tokens=%s prompt_len=%s encoder_length=%s layers=%s prefill_mode=%s max_new=%s" % (
     meta.get("image_tokens"), len(meta.get("prompt_ids", [])),
-    meta.get("encoder_length"), meta.get("decoder_layers"), meta.get("max_new_tokens")))
+    meta.get("encoder_length"), meta.get("decoder_layers"),
+    meta.get("prefill_mode"), meta.get("max_new_tokens")))
 print("prompt_text:", meta.get("prompt_text"))
 PY
     du -sh "$NEW" >>"$MASTER" 2>&1
@@ -144,8 +149,7 @@ PY
   if [ -d "$OLD" ]; then
     run parity "$LOG_DIR/parity.log" python bench/parity.py \
       --old "$OLD" --new "$NEW" --images "$IMAGES" --max-new 256
-    grep -E "^(PARITY|ORT_OLD_vs_PT_OLD|ORT_NEW_vs_PT_OLD|PT_NEW_vs_PT_OLD)" \
-      "$LOG_DIR/parity.log" >>"$MASTER" 2>/dev/null
+    grep -E '^(\{"check"|PARITY)' "$LOG_DIR/parity.log" >>"$MASTER" 2>/dev/null
   else
     say parity "SKIP (no previous export at $OLD to compare against)"
   fi
@@ -165,8 +169,8 @@ PY
       "curl -sS -F 'image=@$IMAGES/82837252.png' $BASE/ocr"
 
     # crash-safety and status codes
-    expect bad_file "$LOG_DIR/robustness.log" 400 bash -c \
-      "curl -sS -o /dev/null -w '%{http_code}' -F 'image=@/etc/hostname' $BASE/ocr | grep -q 400 && exit 0 || exit 1"
+    expect bad_file "$LOG_DIR/robustness.log" 0 bash -c \
+      "curl -sS -o /dev/null -w '%{http_code}' -F 'image=@/etc/hostname' $BASE/ocr | grep -q 400"
     expect no_field "$LOG_DIR/robustness.log" 0 bash -c \
       "curl -sS -X POST $BASE/ocr | grep -q error"
     head -c 11534336 /dev/urandom >"$LOG_DIR/big.bin" 2>/dev/null

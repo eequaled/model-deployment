@@ -10,7 +10,7 @@ The model is split into five graphs:
   vision_encoder.onnx  image -> 577 image tokens          (DaViT, fixed 768x768)
   embed_tokens.onnx    token ids -> embeddings            (shared by prompt and steps)
   encoder_model.onnx   merged embeddings -> encoder states
-  decoder_prefill.onnx encoder states -> logits + 24-tensor cache (self + cross)
+  decoder_prefill.onnx encoder states + decoder prefix -> logits + 24-tensor cache
   decoder_step.onnx    24-tensor cache -> logits + 12 updated self-attention tensors
 
 Why two decoder graphs instead of one: the cross-attention key/value tensors are
@@ -44,6 +44,30 @@ REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
 OPSET = 17
 IMAGE_SIZE = 768
 SLOTS = ("decoder.key", "decoder.value", "encoder.key", "encoder.value")
+
+# What the decoder sees before it predicts its first token. These are different
+# computations, not spellings of one: a causal decoder's first token depends on its
+# own prefix. bench/prefill_probe.py says which one reproduces model.generate().
+#   prompt        all prompt positions (the build the parity runs used)
+#   last          final prompt position only
+#   start         decoder_start_token_id only
+#   prompt_start  prompt followed by one start token
+PREFILL_MODES = ("prompt", "last", "start", "prompt_start")
+
+
+def prefill_positions(mode: str, prompt_len: int) -> int:
+    """How many decoder positions the traced prefill graph stands for.
+
+    Trace at the length the server will actually use. A traced graph keeps the shapes
+    it saw wherever a shape only influences mask construction, so exporting prefill at
+    one position while serving ten is exactly the kind of silent error this file is
+    trying to avoid.
+    """
+    if mode == "prompt":
+        return prompt_len
+    if mode == "prompt_start":
+        return prompt_len + 1
+    return 1
 
 
 def export(module, args, path, input_names, output_names, dynamic_axes):
@@ -107,13 +131,13 @@ class Encoder(nn.Module):
 
 
 class Prefill(nn.Module):
-    """First decoder pass: consumes the last prompt token, returns logits and full cache.
+    """First decoder pass: consumes the decoder prefix, returns logits and the full cache.
 
-    Note what is *not* an input: the decoder's own history. Prefill is only ever
-    called on the final prompt position, because the earlier prompt tokens cannot
-    influence the next token in a causal decoder beyond what it already attends to.
-    Encoding 10 positions and discarding 9 logit rows costs 10x the compute for the
-    same answer, so the graph takes one position and the server keeps only its logits.
+    Only the last logits row is used -- the earlier rows are discarded -- but the
+    positions themselves are not free to drop: in a causal decoder the last position
+    attains its context from the positions before it, so serving one position against
+    a ten-position reference computes something else. bench/prefill_probe.py measures
+    whether that difference matters for this model, and meta.json records the answer.
     """
 
     def __init__(self, language_model, layers):
@@ -164,6 +188,8 @@ class Step(nn.Module):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("/models"), help="where the graphs are written")
+    parser.add_argument("--prefill-mode", choices=PREFILL_MODES, default="prompt",
+                        help="decoder prefix the prefill graph stands for (see PREFILL_MODES)")
     args = parser.parse_args()
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -245,8 +271,10 @@ def main() -> None:
         },
     )
 
-    # Prefill sees exactly one decoder position: the last prompt token.
-    decoder_embeds = torch.randn(1, 1, d_model, generator=generator)
+    # Prefill stands for the decoder prefix in --prefill-mode, traced at its real length.
+    positions = prefill_positions(args.prefill_mode, len(prompt_ids))
+    decoder_embeds = torch.randn(1, positions, d_model, generator=generator)
+    print(f"prefill mode {args.prefill_mode!r}: tracing with {positions} decoder position(s)")
     prefill = Prefill(language_model, layers).eval()
     past_len = 6
     past = tuple(
@@ -325,6 +353,10 @@ def main() -> None:
         "eos_token_id": int(processor.tokenizer.eos_token_id),
         "pad_token_id": int(processor.tokenizer.pad_token_id),
         "decoder_layers": int(layers),
+        # The server reads this to decide what to feed prefill. Changing it is an edit to
+        # one string, not a re-export: the prefill graph is dynamic in its decoder length.
+        "prefill_mode": args.prefill_mode,
+        "prefill_positions": positions,
         "max_new_tokens": 256,
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

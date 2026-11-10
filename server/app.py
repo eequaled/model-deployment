@@ -37,6 +37,7 @@ WORKERS = int(os.getenv("OCR_WORKERS", "1"))
 QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "8"))
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "0"))
+PREFILL_MODE = os.getenv("PREFILL_MODE", "")
 
 
 class State:
@@ -50,7 +51,8 @@ state = State()
 
 def build_engine() -> FlorenceOCR:
     """Constructed once at startup. Tests patch this to avoid needing weights."""
-    return FlorenceOCR(MODEL_DIR, threads=THREADS, max_new_tokens=MAX_NEW_TOKENS)
+    return FlorenceOCR(MODEL_DIR, threads=THREADS, max_new_tokens=MAX_NEW_TOKENS,
+                       prefill_mode=PREFILL_MODE)
 
 
 @asynccontextmanager

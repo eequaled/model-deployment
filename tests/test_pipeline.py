@@ -75,3 +75,26 @@ def test_generate_stops_at_token_cap(engine, monkeypatch):
     monkeypatch.setattr(engine, "max_new_tokens", 3)
     text, _ = engine.generate(Image.new("RGB", (64, 64), (0, 0, 0)))
     assert len(text.split()) <= 3
+
+
+def test_prefill_modes_produce_expected_prefix_shapes(engine, monkeypatch):
+    prompt = engine.sessions["embed_tokens"].run(None, {"input_ids": engine.prompt_ids})[0]
+    expected = {
+        "prompt": len(PROMPT_IDS),
+        "last": 1,
+        "start": 1,
+        "prompt_start": len(PROMPT_IDS) + 1,
+    }
+    for mode, length in expected.items():
+        monkeypatch.setattr(engine, "prefill_mode", mode)
+        prefix = engine.prefill_embeds(prompt)
+        assert prefix.shape == (1, length, 768), mode
+        text, _ = engine.generate(Image.new("RGB", (64, 64), (255, 255, 255)))
+        assert isinstance(text, str) and text
+
+
+def test_unknown_prefill_mode_fails_at_startup(model_dir):
+    from server.ocr_engine import FlorenceOCR
+
+    with pytest.raises(RuntimeError, match="prefill_mode"):
+        FlorenceOCR(model_dir, threads=1, prefill_mode="bogus")

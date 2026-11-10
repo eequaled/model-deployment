@@ -34,7 +34,9 @@ class Pipeline:
         self.meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
         self.tokenizer = Tokenizer.from_file(str(self.dir / "tokenizer.json"))
         self.prompt_ids = np.asarray(self.meta["prompt_ids"], dtype=np.int64)[None, :]
+        self.start_ids = np.asarray([[int(self.meta["decoder_start_token_id"])]], dtype=np.int64)
         self.eos = int(self.meta["eos_token_id"])
+        self.prefill_mode = str(self.meta.get("prefill_mode", "prompt"))
         options = ort.SessionOptions()
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
@@ -49,9 +51,14 @@ class Pipeline:
             )
             for n in names
         }
+        self.prefill_in = [i.name for i in self.sessions["decoder_prefill"].get_inputs()]
         self.prefill_out = [o.name for o in self.sessions["decoder_prefill"].get_outputs()]
         self.step_in = [i.name for i in self.sessions["decoder_step"].get_inputs()]
         self.step_out = [o.name for o in self.sessions["decoder_step"].get_outputs()]
+        self.prefill_embeds_input = next(
+            (n for n in ("decoder_input_embeds", "decoder_inputs_embeds") if n in self.prefill_in),
+            "decoder_input_embeds",
+        )
         self.layout = "ids" if "input_ids" in self.step_in else "embeds"
 
     def preprocess(self, image: Image.Image) -> np.ndarray:
@@ -63,6 +70,16 @@ class Pipeline:
         )
         return np.ascontiguousarray(array.transpose(2, 0, 1)[None], dtype=np.float32)
 
+    def prefill_embeds(self, prompt_embeds: np.ndarray) -> np.ndarray:
+        if self.prefill_mode == "prompt":
+            return prompt_embeds
+        if self.prefill_mode == "last":
+            return prompt_embeds[:, -1:, :]
+        start = self.sessions["embed_tokens"].run(None, {"input_ids": self.start_ids})[0]
+        if self.prefill_mode == "start":
+            return start
+        return np.concatenate([prompt_embeds, start], axis=1).astype(np.float32)
+
     def run(self, image: Image.Image, max_new: int) -> list[int]:
         s = self.sessions
         pixels = self.preprocess(image)
@@ -72,18 +89,19 @@ class Pipeline:
         mask = np.ones((1, merged.shape[1]), dtype=np.float32)
         enc = s["encoder_model"].run(None, {"inputs_embeds": merged, "attention_mask": mask})[0]
 
-        # both layouts feed the last prompt position to prefill
-        feed = {"encoder_hidden_states": enc, "encoder_attention_mask": mask}
-        if "decoder_input_embeds" in [i.name for i in s["decoder_prefill"].get_inputs()]:
-            feed["decoder_input_embeds"] = prompt_embeds[:, -1:, :]
-        else:  # older export took the whole prompt
-            feed["decoder_inputs_embeds"] = prompt_embeds
+        feed = {
+            "encoder_hidden_states": enc,
+            "encoder_attention_mask": mask,
+            self.prefill_embeds_input: self.prefill_embeds(prompt_embeds),
+        }
         out = s["decoder_prefill"].run(None, feed)
         cache = dict(zip(self.prefill_out[1:], out[1:]))
         tokens = [int(out[0][0, -1].argmax())]
 
         while tokens[-1] != self.eos and len(tokens) < max_new:
             step_feed = {"encoder_attention_mask": mask}
+            if "encoder_hidden_states" in self.step_in:
+                step_feed["encoder_hidden_states"] = enc
             if self.layout == "ids":
                 step_feed["input_ids"] = np.array([[tokens[-1]]], dtype=np.int64)
             else:
@@ -123,7 +141,8 @@ def compare(label: str, a: list[int], b: list[int]) -> bool:
     return same
 
 
-def pytorch_tokens(model_dir: Path, images: list[Path], max_new: int) -> dict[str, list[int]]:
+def pytorch_tokens(model_dir: Path, images: list[Path], max_new: int,
+                   prefill_mode: str = "prompt") -> dict[str, list[int]]:
     """Greedy loop in PyTorch over the *original* model, for a second opinion."""
     import torch
     from transformers import AutoModelForCausalLM, AutoProcessor
@@ -146,10 +165,19 @@ def pytorch_tokens(model_dir: Path, images: list[Path], max_new: int) -> dict[st
             merged = torch.cat([feats, prompt_embeds], dim=1)
             mask = torch.ones(merged.shape[:2], dtype=torch.float32)
             enc = lm.model.encoder(inputs_embeds=merged, attention_mask=mask).last_hidden_state
+            start_ids = torch.tensor([[int(meta["decoder_start_token_id"])]], dtype=torch.long)
+            if prefill_mode == "prompt":
+                prefix = prompt_embeds
+            elif prefill_mode == "last":
+                prefix = prompt_embeds[:, -1:, :]
+            elif prefill_mode == "start":
+                prefix = lm.get_input_embeddings()(start_ids)
+            else:
+                prefix = torch.cat([prompt_embeds, lm.get_input_embeddings()(start_ids)], dim=1)
             out = lm(
                 encoder_outputs=BaseModelOutput(last_hidden_state=enc),
                 attention_mask=mask,
-                decoder_inputs_embeds=prompt_embeds[:, -1:, :],
+                decoder_inputs_embeds=prefix,
                 use_cache=True,
                 return_dict=True,
             )
@@ -188,14 +216,14 @@ def main() -> int:
 
     old = Pipeline(args.old, args.threads)
     new = Pipeline(args.new, args.threads)
-    print(f"old step inputs: {old.step_in}", flush=True)
-    print(f"new step inputs: {new.step_in}", flush=True)
+    print(f"old ({old.prefill_mode}) step inputs: {old.step_in[:4]}...", flush=True)
+    print(f"new ({new.prefill_mode}) step inputs: {new.step_in[:4]}...", flush=True)
 
     torch_tokens: dict[str, list[int]] = {}
     if not args.no_torch:
         try:
-            print("running the PyTorch reference loop (slow)...", flush=True)
-            torch_tokens = pytorch_tokens(args.old, images, args.max_new)
+            print(f"running the PyTorch reference loop (prefill_mode={new.prefill_mode!r})...", flush=True)
+            torch_tokens = pytorch_tokens(args.new, images, args.max_new, prefill_mode=new.prefill_mode)
         except Exception as exc:  # torch absence is the normal case in the runtime image
             print(f"PyTorch reference skipped: {type(exc).__name__}: {exc}", flush=True)
 

@@ -13,9 +13,12 @@ Two details matter more than they look:
 * Encoder length. The step graph broadcasts its attention mask against the cached
   cross-attention tensors, so mask length must equal the prefill encoder length
   exactly. A mismatch is a hard runtime error, not a silent drift.
-* Prefill is one position. In a causal decoder only the last prompt position can
-  predict the next token, so prefill runs once on that position and keeps its logits.
-  Running all ten and slicing would cost ten times the compute for the same answer.
+* The prefill prefix. A causal decoder's first token depends on what came before it, so
+  "the prompt", "just the last prompt token" and "just the start token" are different
+  computations. bench/prefill_probe.py compares them against model.generate(), the
+  exporter records the winner as `prefill_mode` in meta.json, and PREFILL_MODE can
+  override it at runtime for an A/B over HTTP. Only the last row of prefill logits is
+  ever used; the extra positions exist to give that row its context.
 """
 
 from __future__ import annotations
@@ -32,9 +35,12 @@ from tokenizers import Tokenizer
 
 logger = logging.getLogger(__name__)
 
+PREFILL_MODES = ("prompt", "last", "start", "prompt_start")
+
 
 class FlorenceOCR:
-    def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0) -> None:
+    def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0,
+                 prefill_mode: str = "") -> None:
         self.model_dir = Path(model_dir)
         self.meta = json.loads((self.model_dir / "meta.json").read_text(encoding="utf-8"))
         self.tokenizer = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
@@ -45,19 +51,30 @@ class FlorenceOCR:
         self.rescale = float(self.meta["rescale_factor"])
         self.prompt_ids = np.asarray(self.meta["prompt_ids"], dtype=np.int64)[None, :]
         self.start_id = int(self.meta["decoder_start_token_id"])
-        # Florence-2 is Bart-like: generation starts from the end-of-sequence id, but
-        # the prefill position is the *final prompt token*, whose hidden state has
-        # already attended to everything before it. Embedded prompt vectors already
-        # exist, so no separate start-token lookup is needed at all.
         self.eos_id = int(self.meta["eos_token_id"])
         self.layers = int(self.meta["decoder_layers"])
         self.max_new_tokens = max_new_tokens or int(self.meta["max_new_tokens"])
+        self.prefill_mode = prefill_mode or str(self.meta.get("prefill_mode", "prompt"))
+        if self.prefill_mode not in PREFILL_MODES:
+            raise RuntimeError(
+                f"unknown prefill_mode {self.prefill_mode!r}; expected one of {PREFILL_MODES}"
+            )
+        self.start_ids = np.asarray([[self.start_id]], dtype=np.int64)
 
         self.threads = threads
         self.sessions = self._load_sessions()
         self.prefill_outputs = [o.name for o in self.sessions["decoder_prefill"].get_outputs()]
+        self.prefill_inputs = [i.name for i in self.sessions["decoder_prefill"].get_inputs()]
         self.step_inputs = [i.name for i in self.sessions["decoder_step"].get_inputs()]
         self.step_outputs = [o.name for o in self.sessions["decoder_step"].get_outputs()]
+        # The graph may name its embedding input either way depending on the export; take
+        # whichever the file declares instead of guessing and failing at request time.
+        self.prefill_embeds_input = next(
+            (name for name in ("decoder_input_embeds", "decoder_inputs_embeds")
+             if name in self.prefill_inputs),
+            "decoder_input_embeds",
+        )
+        self._check_cache_contract()
 
         expected = self.meta.get("image_tokens")
         if expected is not None:
@@ -94,6 +111,34 @@ class FlorenceOCR:
         logger.info("loaded 5 sessions in %.1fs", time.perf_counter() - started)
         return sessions
 
+    def _check_cache_contract(self) -> None:
+        """Fail at startup if the graphs and meta.json disagree about the cache.
+
+        A mismatch here is only visible a hundred tokens into decoding, as a broadcast
+        error or a silently truncated cache, so it is worth one eager check.
+        """
+        present = [name for name in self.prefill_outputs if name.startswith("present.")]
+        past = [name for name in self.step_inputs if name.startswith("past_key_values.")]
+        returned = [name for name in self.step_outputs if name.startswith("present.")]
+        known = {"input_ids", "encoder_attention_mask", "encoder_hidden_states"}
+        unknown = [n for n in self.step_inputs if not n.startswith("past_key_values.") and n not in known]
+        problems = [
+            f"prefill emits {len(present)} present tensors, expected {4 * self.layers}",
+            f"step takes {len(past)} past tensors, expected {4 * self.layers}",
+            f"step returns {len(returned)} present tensors, expected {2 * self.layers}",
+            f"step wants unrecognised inputs {unknown}",
+        ]
+        wrong = [p for p, ok in zip(problems,
+                                    (len(present) == 4 * self.layers,
+                                     len(past) == 4 * self.layers,
+                                     len(returned) == 2 * self.layers,
+                                     not unknown)) if not ok]
+        if wrong:
+            raise RuntimeError(
+                f"cache contract mismatch for {self.layers} layers in {self.model_dir}: "
+                + "; ".join(wrong)
+            )
+
     # -- preprocessing -------------------------------------------------------
     def preprocess(self, image) -> np.ndarray:
         # Byte-exact with the reference preprocessing measured offline: RGB,
@@ -105,7 +150,6 @@ class FlorenceOCR:
         return np.ascontiguousarray(array.transpose(2, 0, 1)[None], dtype=np.float32)
 
     # -- inference -----------------------------------------------------------
-    # -- inference -----------------------------------------------------------
     def _run(self, name: str, feed: dict[str, np.ndarray]) -> list[np.ndarray]:
         return self.sessions[name].run(None, feed)
 
@@ -115,6 +159,38 @@ class FlorenceOCR:
         if len(shape) == 3 and isinstance(shape[1], int):
             return shape[1]
         return -1
+
+    def prefill_embeds(self, prompt_embeds: np.ndarray) -> np.ndarray:
+        """The decoder prefix this build serves, per meta.json / PREFILL_MODE."""
+        if self.prefill_mode == "prompt":
+            return prompt_embeds
+        if self.prefill_mode == "last":
+            return prompt_embeds[:, -1:, :]
+        start = self._run("embed_tokens", {"input_ids": self.start_ids})[0]
+        if self.prefill_mode == "start":
+            return start
+        return np.concatenate([prompt_embeds, start], axis=1).astype(np.float32)
+
+    def step_feed(self, mask: np.ndarray, token: int, cache: dict[str, np.ndarray],
+                  encoder_states: np.ndarray) -> dict[str, np.ndarray]:
+        """Everything the step graph declares, keyed by the names it declared."""
+        feed = {
+            "encoder_attention_mask": mask,
+            "input_ids": np.array([[token]], dtype=np.int64),
+        }
+        if "encoder_hidden_states" in self.step_inputs:
+            # Tracing normally drops this input, because the cached cross-attention makes
+            # the values unused. When it survives, the values still do not matter -- only
+            # the mask length does -- so feeding the real states is the cheapest way to
+            # satisfy it.
+            feed["encoder_hidden_states"] = encoder_states
+        for name in self.step_inputs:
+            if name.startswith("past_key_values."):
+                feed[name] = cache["present." + name[len("past_key_values."):]]
+        missing = [name for name in self.step_inputs if name not in feed]
+        if missing:
+            raise RuntimeError(f"step graph wants inputs this server does not provide: {missing}")
+        return feed
 
     def generate(self, image) -> tuple[str, dict[str, float]]:
         started = time.perf_counter()
@@ -137,15 +213,14 @@ class FlorenceOCR:
         encoder_states = self._run("encoder_model", {"inputs_embeds": merged, "attention_mask": mask})[0]
         prefill_at = time.perf_counter()
 
-        # Only the final prompt position: its hidden state is the one that predicts
-        # the first generated token (see the module docstring).
-        last_prompt_embeds = prompt_embeds[:, -1:, :]
+        # The decoder prefix: see the module docstring. Only the last row of logits is
+        # kept; the positions exist so that row has the context the reference gave it.
         outputs = self._run(
             "decoder_prefill",
             {
                 "encoder_hidden_states": encoder_states,
                 "encoder_attention_mask": mask,
-                "decoder_input_embeds": last_prompt_embeds,
+                self.prefill_embeds_input: self.prefill_embeds(prompt_embeds),
             },
         )
         cache = dict(zip(self.prefill_outputs[1:], outputs[1:]))
@@ -154,15 +229,7 @@ class FlorenceOCR:
         while tokens[-1] != self.eos_id and len(tokens) < self.max_new_tokens:
             # The embedding lookup happens inside the step graph now, so this is a
             # token id rather than a 768-float tensor.
-            feed = {
-                "encoder_attention_mask": mask,
-                "input_ids": np.array([[tokens[-1]]], dtype=np.int64),
-            }
-            for name in self.step_inputs:
-                if name.startswith("past_key_values."):
-                    slot = name[len("past_key_values."):]
-                    feed[name] = cache[f"present.{slot}"]
-            outputs = self._run("decoder_step", feed)
+            outputs = self._run("decoder_step", self.step_feed(mask, tokens[-1], cache, encoder_states))
             tokens.append(int(outputs[0][0, -1].argmax()))
             cache.update(zip(self.step_outputs[1:], outputs[1:]))
 
