@@ -93,8 +93,8 @@ def test_prefill_modes_produce_expected_prefix_shapes(engine, monkeypatch):
         assert isinstance(text, str) and text
 
 
-def test_unknown_prefill_mode_fails_at_startup(model_dir):
+def test_unknown_prefill_mode_fails_at_startup(tiny_model_dir):
     from server.ocr_engine import FlorenceOCR
 
     with pytest.raises(RuntimeError, match="prefill_mode"):
-        FlorenceOCR(model_dir, threads=1, prefill_mode="bogus")
+        FlorenceOCR(tiny_model_dir, threads=1, prefill_mode="bogus")
