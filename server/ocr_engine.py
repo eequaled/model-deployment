@@ -5,7 +5,7 @@ into 577 tokens, the prompt contributes 10 more, one encoder pass fuses them, a
 prefill pass produces the first token plus the full attention cache, and each later
 step takes that cache and returns one token.
 
-Two details matter more than they look:
+A few details matter more than they look:
 
 * Prompt text. Florence-2 does not tokenize the literal string "<OCR>". The
   processor swaps in a sentence and tokenizes that. The ids are baked into
@@ -19,6 +19,10 @@ Two details matter more than they look:
   exporter records the winner as `prefill_mode` in meta.json, and PREFILL_MODE can
   override it at runtime for an A/B over HTTP. Only the last row of prefill logits is
   ever used; the extra positions exist to give that row its context.
+* Decoding. `<OCR>` is post-processed as `pure_text`: the ids are decoded with special
+  tokens left in, then only the literal `<s>` and `</s>` strings are removed. Nothing
+  is stripped, so the whitespace the reference keeps survives, and any other special
+  token (a `<pad>`, say) stays in the text exactly as the reference leaves it.
 """
 
 from __future__ import annotations
@@ -30,12 +34,23 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
-from PIL import Image, ImageOps
+from PIL import Image
 from tokenizers import Tokenizer
 
 logger = logging.getLogger(__name__)
 
 PREFILL_MODES = ("prompt", "last", "start", "prompt_start")
+
+
+def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
+    """Decode exactly like Florence-2's ``pure_text`` post-processing.
+
+    The reference decodes with ``skip_special_tokens=False`` and then removes the
+    literal ``<s>`` and ``</s>`` strings. It does not strip whitespace and does not
+    remove any other special token, so neither do we.
+    """
+    text = tokenizer.decode(tokens, skip_special_tokens=False)
+    return text.replace("<s>", "").replace("</s>", "")
 
 
 class FlorenceOCR:
@@ -152,9 +167,10 @@ class FlorenceOCR:
 
     # -- preprocessing -------------------------------------------------------
     def preprocess(self, image) -> np.ndarray:
-        # Byte-exact with the reference preprocessing measured offline: RGB,
-        # bicubic to 768x768, rescale, ImageNet normalize, CHW.
-        image = ImageOps.exif_transpose(image).convert("RGB")
+        # Deliberately byte-exact with the reference CLIPImageProcessor: RGB, bicubic
+        # to 768x768, rescale, ImageNet normalize, CHW. No EXIF rotation, because the
+        # reference processor does not apply any either.
+        image = image.convert("RGB")
         image = image.resize((self.image_size, self.image_size), resample=Image.BICUBIC)
         array = np.asarray(image, dtype=np.float32) * self.rescale
         array = (array - self.mean) / self.std
@@ -246,7 +262,7 @@ class FlorenceOCR:
             tokens.append(int(outputs[0][0, -1].argmax()))
             cache.update(zip(self.step_outputs[1:], outputs[1:]))
 
-        text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        text = decode_pure_text(self.tokenizer, tokens)
         finished = time.perf_counter()
         timings = {
             "encoder_ms": round(1000 * (prefill_at - started), 1),
