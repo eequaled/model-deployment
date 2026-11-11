@@ -59,7 +59,9 @@ def main() -> int:
     parser.add_argument("--url", default="http://localhost:8000")
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--refs", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, default=300.0)
+    # The challenge counts a response slower than 30 s as a failure, so score with
+    # the same budget instead of waiting five minutes for a request that lost.
+    parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()

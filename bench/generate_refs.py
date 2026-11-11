@@ -5,9 +5,13 @@ across all ~50 test images in `~/florence-lab/funsd/dataset/testing_data/images`
 Writes a `filename -> text` JSON mapping directly usable by `python -m bench.accuracy`,
 updating the file after each image so a partial run is still usable.
 
-  ~/florence-lab/.venv-onnx/bin/python -m bench.generate_refs \
+  ~/florence-lab/.venv312/bin/python -m bench.generate_refs \
       --images ~/florence-lab/funsd/dataset/testing_data/images \
       --out ~/florence-lab/references-funsd-fp32.json --limit 50
+
+Use the environment that matches `baseline.py` (here transformers 4.40.2). A newer
+transformers changes `clean_up_tokenization_spaces`, which would move the reference
+text by a few whitespace characters and quietly change the score.
 """
 
 from __future__ import annotations
@@ -47,7 +51,16 @@ def main() -> int:
     if args.out.exists():
         try:
             loaded = json.loads(args.out.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and "images" not in loaded:
+            if isinstance(loaded, dict) and isinstance(loaded.get("images"), list):
+                # Resume from the richer reference format as well as from a flat
+                # filename -> text map, so pointing --out at an existing reference
+                # file never silently drops the images it has not reached yet.
+                existing = {
+                    str(item["filename"]): str(item["text"])
+                    for item in loaded["images"]
+                    if isinstance(item, dict) and "filename" in item and "text" in item
+                }
+            elif isinstance(loaded, dict):
                 existing = {str(k): str(v) for k, v in loaded.items()}
         except Exception:
             pass
