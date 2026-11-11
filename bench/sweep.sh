@@ -32,10 +32,13 @@ for cfg in $CONFIGS; do
   S="${rest%%:*}"; Q="${rest#*:}"
   TAG="w${W}_t${T}_s${S}_q${Q}"
   LOG="$OUT/$TAG.log"
+  NAME="ocr-sweep-$TAG"
   echo "=== $TAG ===" | tee "$LOG"
 
-  docker rm -f ocr-sweep >/dev/null 2>&1
-  if ! docker run -d --rm --name ocr-sweep -p 8000:8000 \
+  # A unique name per config: `docker run --rm` removes asynchronously, so reusing
+  # one name across back-to-back configs races and fails with "name already in use".
+  docker rm -f "$NAME" >/dev/null 2>&1
+  if ! docker run -d --rm --name "$NAME" -p 8000:8000 \
       --memory=4g --memory-swap=4g --cpus="$CPUS" \
       -e OCR_WORKERS="$W" -e ORT_THREADS="$T" \
       -e ORT_ALLOW_SPINNING="$S" -e QUEUE_LIMIT="$Q" \
@@ -51,8 +54,8 @@ for cfg in $CONFIGS; do
   done
   if [ "$healthy" != 1 ]; then
     echo "never healthy" | tee -a "$LOG"
-    docker logs --tail 20 ocr-sweep >>"$LOG" 2>&1
-    docker stop ocr-sweep >/dev/null 2>&1
+    docker logs --tail 20 "$NAME" >>"$LOG" 2>&1
+    docker stop "$NAME" >/dev/null 2>&1
     continue
   fi
 
@@ -62,17 +65,17 @@ for cfg in $CONFIGS; do
       --mode latency --repeats 1 --timeout 30
     echo "--- closed loop ---"
     "$PY" -m bench.load --url http://127.0.0.1:8000 --images "$IMAGES" \
-      --mode throughput --clients 2,4 --seconds "$SECONDS_PER_STEP" --timeout 30
+      --mode throughput --clients 2 --seconds "$SECONDS_PER_STEP" --timeout 30
     echo "--- open loop (step 2) ---"
     "$PY" -m bench.load --url http://127.0.0.1:8000 --images "$IMAGES" \
-      --mode open --rates 0.1,0.15 --seconds "$SECONDS_PER_STEP" --timeout 30
+      --mode open --rates 0.1,0.12,0.15 --seconds "$SECONDS_PER_STEP" --timeout 30
   } 2>&1 | tee -a "$LOG"
 
   echo "--- memory ---" | tee -a "$LOG"
-  docker exec ocr-sweep sh -c "grep -E 'VmHWM|VmRSS' /proc/1/status" 2>&1 | tee -a "$LOG"
-  docker stats --no-stream --format '{{.MemUsage}} pids={{.PIDs}}' ocr-sweep 2>&1 | tee -a "$LOG"
-  docker stop ocr-sweep >/dev/null 2>&1
-  docker rm -f ocr-sweep >/dev/null 2>&1
+  docker exec "$NAME" sh -c "grep -E 'VmHWM|VmRSS' /proc/1/status" 2>&1 | tee -a "$LOG"
+  docker stats --no-stream --format "{{.MemUsage}} pids={{.PIDs}}" "$NAME" 2>&1 | tee -a "$LOG"
+  docker stop "$NAME" >/dev/null 2>&1
+  docker rm -f "$NAME" >/dev/null 2>&1
 done
 
 echo "sweep done: $OUT"
