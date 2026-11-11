@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(os.getenv("MODEL_DIR", "/models"))
 THREADS = int(os.getenv("ORT_THREADS", "0"))
 WORKERS = int(os.getenv("OCR_WORKERS", "1"))
-QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "8"))
+# One waiting slot: at ~8 s per request a deeper queue turns overload into
+# 30 s timeouts, which the challenge counts as failures. Excess load gets a fast 503.
+QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "1"))
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000)))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "0"))

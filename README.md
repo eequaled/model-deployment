@@ -22,10 +22,11 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 | Export from pinned weights | verified: 5 graphs, **1,377.9 MiB**, `577 + 10 = 587` encoder length |
 | Token parity, old vs new graphs | **PASS**: 5/5 images token-identical (225/154/201/256/256) |
 | Prefill prefix | `start` matches `model.generate()`; `prompt`/`prompt_start` do not |
-| Unit + graph tests | **27 passed, 6 skipped** without weights; **33 passed** with a real export; 0 errors |
-| Server (v3 graphs) | ready in 6 s; OCR 6.7 s total on 12 threads; `VmHWM ≈ 3.07 GiB` |
-| Docker under `--memory=4g --cpus=4` | build and run verified: healthy in 4 s, OCR 10.3 s, 3.12 GiB / 4 GiB, torch absent |
-| Official accuracy vs organizer baseline | not available yet |
+| Unit + graph tests | **34 passed, 6 skipped** without weights; **40 passed** with a real export; 0 errors |
+| Step 1 latency (4 CPUs) | sequential p50 **8.29 s**, p95 **9.35 s** over 50 images |
+| Step 2 throughput (4 CPUs) | **0.15 req/s at 100% success** (0.10 and 0.12 also clean); one worker, 4 threads, spinning off |
+| Docker under `--memory=4g --cpus=4` | build 140.5 s with pinned torch; single OCR 7.6 s (encoder 2.44 s, decode 5.16 s); peak `VmHWM` 3.57 GiB; torch absent |
+| Official accuracy vs organizer baseline | not available yet; 50-image fp32 proxy in the journal |
 
 ## Build and run
 
@@ -177,13 +178,13 @@ Not adopted, with reasons:
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | listen address |
 | `ORT_THREADS` | `0` | intra-op threads; `0` sizes from cgroup CPU quota (or lets ORT decide on bare metal) |
 | `OCR_WORKERS` | `1` | threads running inference |
-| `QUEUE_LIMIT` | `8` | additional requests allowed to wait before fast `503`s |
+| `QUEUE_LIMIT` | `1` | additional requests allowed to wait before fast `503`s |
 | `MAX_UPLOAD_BYTES` | `10485760` | uploads above this get `413` |
 | `MAX_IMAGE_PIXELS` | `40000000` | decoded pixel cap (40 MP) checked before `image.load()`, returns `413` |
 | `MAX_NEW_TOKENS` | from `meta.json` | hard cap on generated tokens |
 | `PREFILL_MODE` | from `meta.json` | override the decoder prefix (`start`, `last`, `prompt`, `prompt_start`) |
 | `WARMUP` | `1` | run a 2-token warm-up pass across all 5 sessions before `/health` reports `200` |
-| `ORT_ALLOW_SPINNING` | unset | set to `0` or `1` to override `session.intra_op.allow_spinning` |
+| `ORT_ALLOW_SPINNING` | `0` | `session.intra_op.allow_spinning`; off wins under a CPU quota |
 | `ORT_MEM_ARENA` | `1` | set to `0` to disable ORT's CPU memory arena |
 | `KEEP_ALIVE` | `30` | uvicorn keep-alive seconds |
 
