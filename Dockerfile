@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 # torch and torchvision must be installed together from the CPU index: installing
 # torch alone lets timm pull a PyPI torchvision built against a different torch,
 # which fails at import with "operator torchvision::nms does not exist".
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1" "torchvision==0.20.1" \
     && pip install "transformers==4.48.3" "onnx==1.17.0" "safetensors" \
        "pillow" "numpy" "huggingface_hub" "timm" "einops"
 

@@ -218,12 +218,18 @@ fi
 # 5. docker, under the official limits -------------------------------------
 if [ "$RUN_DOCKER" = 1 ]; then
   IMAGE="florence2-ocr:runall"
+  DOCKER_CPUS="${DOCKER_CPUS:-4}"
+  DOCKER_WORKERS="${DOCKER_WORKERS:-1}"
+  DOCKER_THREADS="${DOCKER_THREADS:-0}"
+  DOCKER_QUEUE="${DOCKER_QUEUE:-8}"
   say docker "building $IMAGE (log: $LOG_DIR/docker_build.log)"
   if docker build -t "$IMAGE" . >>"$LOG_DIR/docker_build.log" 2>&1; then
     say docker "build PASS"
-    say docker "running with --memory=4g --memory-swap=4g"
+    say docker "running with --memory=4g --memory-swap=4g --cpus=$DOCKER_CPUS (workers=$DOCKER_WORKERS threads=$DOCKER_THREADS)"
     docker run --rm --name runall-ocr -p "$PORT:8000" \
-      --memory=4g --memory-swap=4g "$IMAGE" >"$LOG_DIR/docker_run.log" 2>&1 &
+      --memory=4g --memory-swap=4g --cpus="$DOCKER_CPUS" \
+      -e OCR_WORKERS="$DOCKER_WORKERS" -e ORT_THREADS="$DOCKER_THREADS" -e QUEUE_LIMIT="$DOCKER_QUEUE" \
+      "$IMAGE" >"$LOG_DIR/docker_run.log" 2>&1 &
     SERVERS+=($!)
     START=$(date +%s)
     if wait_health "http://127.0.0.1:$PORT" 150; then
@@ -231,8 +237,12 @@ if [ "$RUN_DOCKER" = 1 ]; then
       run docker_request "$LOG_DIR/docker_request.log" bash -c \
         "curl -sS -F 'image=@$IMAGES/82837252.png' http://127.0.0.1:$PORT/ocr"
       run docker_bench "$LOG_DIR/docker_bench.log" python -m bench.load \
-        --url "http://127.0.0.1:$PORT" --images "$IMAGES" --mode latency --repeats 2
+        --url "http://127.0.0.1:$PORT" --images "$IMAGES" --mode all --repeats 2 \
+        --clients 1,2,4,8 --seconds 30 --timeout 30 --json-out "$LOG_DIR/docker_bench.json"
       grep -E '^\{"mode"' "$LOG_DIR/docker_bench.log" >>"$MASTER" 2>/dev/null
+      run docker_stress "$LOG_DIR/docker_stress.log" python -m bench.stress \
+        --url "http://127.0.0.1:$PORT" --images "$IMAGES" --json-out "$LOG_DIR/docker_stress.json"
+      grep -E '^(\{"check"|STRESS)' "$LOG_DIR/docker_stress.log" >>"$MASTER" 2>/dev/null
       docker stats --no-stream runall-ocr >>"$MASTER" 2>&1
       docker exec runall-ocr python -c "import importlib.util as u; print('torch present:', bool(u.find_spec('torch')))" \
         >>"$MASTER" 2>&1

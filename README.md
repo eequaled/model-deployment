@@ -173,12 +173,16 @@ Not adopted, with reasons:
 |---|---|---|
 | `MODEL_DIR` | `/models` | where the exported graphs live |
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | listen address |
-| `ORT_THREADS` | `0` | intra-op threads, `0` lets ONNX Runtime decide |
+| `ORT_THREADS` | `0` | intra-op threads; `0` sizes from cgroup CPU quota (or lets ORT decide on bare metal) |
 | `OCR_WORKERS` | `1` | threads running inference |
 | `QUEUE_LIMIT` | `8` | additional requests allowed to wait before fast `503`s |
 | `MAX_UPLOAD_BYTES` | `10485760` | uploads above this get `413` |
+| `MAX_IMAGE_PIXELS` | `40000000` | decoded pixel cap (40 MP) checked before `image.load()`, returns `413` |
 | `MAX_NEW_TOKENS` | from `meta.json` | hard cap on generated tokens |
 | `PREFILL_MODE` | from `meta.json` | override the decoder prefix (`start`, `last`, `prompt`, `prompt_start`) |
+| `WARMUP` | `1` | run a 2-token warm-up pass across all 5 sessions before `/health` reports `200` |
+| `ORT_ALLOW_SPINNING` | unset | set to `0` or `1` to override `session.intra_op.allow_spinning` |
+| `ORT_MEM_ARENA` | `1` | set to `0` to disable ORT's CPU memory arena |
 | `KEEP_ALIVE` | `30` | uvicorn keep-alive seconds |
 
 ## Reproducing the model without Docker
@@ -221,9 +225,16 @@ percentile/sustained-rate math all have tests that need no weights.
 # accuracy against reference text, using the challenge's max(0, 1 - CER) rule
 python -m bench.accuracy --url http://localhost:8000 --images samples --refs refs.json
 
-# sequential p50/p95/p99, then concurrency sweep; each step also reports
-# success_rate and sustained_rps (successes only, zero below 99% success)
-python -m bench.load --url http://localhost:8000 --images samples --mode all
+# generate fp32 PyTorch references offline across a directory of images
+python -m bench.generate_refs --images ~/florence-lab/funsd/dataset/testing_data/images \
+    --out ~/florence-lab/references-funsd-fp32.json --limit 50
+
+# sequential p50/p95/p99, closed-loop concurrency sweep, or open-loop arrival rates
+python -m bench.load --url http://localhost:8000 --images samples --mode all --timeout 30
+python -m bench.load --url http://localhost:8000 --images samples --mode open --rates 0.08,0.1,0.12,0.15 --seconds 120 --timeout 30
+
+# Step 3 resilience: malformed inputs, 64 MP header bomb, overload spike (503), and recovery
+python -m bench.stress --url http://localhost:8000 --images samples
 
 # old graphs vs new graphs, token by token
 python bench/parity.py --old models-old --new models-new --images samples --max-new 256 --no-torch

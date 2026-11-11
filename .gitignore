@@ -20,6 +20,7 @@ models/
 data/
 samples/*
 !samples/.gitkeep
+!samples/example.png
 *.log
 bench/*.json
 results/
