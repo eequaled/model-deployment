@@ -55,3 +55,25 @@ def test_open_loop_dispatches_at_target_rate_and_records_target(capsys):
     assert row["errors"] == 0
     assert row["sustained_rps"] > 0.0
     capsys.readouterr()
+
+
+def test_png_header_only_bomb_triggers_413_on_app(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from bench.accuracy import load_refs
+    from bench.stress import png_header_only_bomb
+    from server import app as app_module
+
+    refs_file = tmp_path / "refs.json"
+    refs_file.write_text('{"images": [{"filename": "a.png", "text": "hello"}]}', encoding="utf-8")
+    assert load_refs(refs_file) == {"a.png": "hello"}
+
+    monkeypatch.setattr(app_module, "WARMUP", False)
+    monkeypatch.setattr(app_module, "build_engine", lambda: object())
+    with TestClient(app_module.app) as client:
+        resp = client.post(
+            "/ocr",
+            files={"image": ("bomb.png", png_header_only_bomb(8000, 8000), "image/png")},
+        )
+        assert resp.status_code == 413
+        assert "pixel" in resp.json()["error"]

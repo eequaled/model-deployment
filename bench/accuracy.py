@@ -44,6 +44,12 @@ def load_refs(refs: Path) -> dict[str, str]:
         return {p.stem: p.read_text(encoding="utf-8").strip() for p in refs.glob("*.txt")}
     data = json.loads(refs.read_text(encoding="utf-8"))
     if isinstance(data, dict):
+        if isinstance(data.get("images"), list):
+            return {
+                str(item["filename"]): str(item["text"])
+                for item in data["images"]
+                if isinstance(item, dict) and "filename" in item and "text" in item
+            }
         return {str(k): str(v) for k, v in data.items()}
     raise SystemExit("references JSON must be an object of filename -> text")
 
