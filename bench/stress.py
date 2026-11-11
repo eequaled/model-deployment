@@ -55,6 +55,11 @@ def raw_request(
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         status = exc.code
+    except (urllib.error.URLError, TimeoutError, OSError):
+        # A refused connection or a hung request is a status-0 failure. Returning it
+        # keeps the harness reporting a result instead of dying with a traceback.
+        raw = b""
+        status = 0
     elapsed_ms = round(1000 * (time.perf_counter() - t0), 1)
     try:
         parsed = json.loads(raw) if raw else {}
@@ -131,9 +136,17 @@ def run_overload_spike(url: str, images: list[Path], clients: int, timeout: floa
             barrier.wait(timeout=5.0)
         except threading.BrokenBarrierError:
             pass
-        status, _, elapsed_ms = raw_request(
-            url, "/ocr", method="POST", body=body, headers=headers, timeout=timeout
-        )
+        t0 = time.perf_counter()
+        try:
+            status, _, elapsed_ms = raw_request(
+                url, "/ocr", method="POST", body=body, headers=headers, timeout=timeout
+            )
+        except Exception:
+            # A request that never answers is a failed request, not a missing data
+            # point. Dropping it would let a queue that is too deep "pass" the spike
+            # simply by timing out instead of returning a status.
+            status = 0
+            elapsed_ms = round(1000 * (time.perf_counter() - t0), 1)
         with lock:
             statuses.append(status)
             if status == 503:
@@ -152,6 +165,7 @@ def run_overload_spike(url: str, images: list[Path], clients: int, timeout: floa
     count_200 = statuses.count(200)
     count_503 = statuses.count(503)
     other = [s for s in statuses if s not in (200, 503)]
+    max_503_ms = round(max(ms_503), 1) if ms_503 else 0.0
     row = {
         "check": f"overload_spike_c{clients}",
         "clients": clients,
@@ -159,8 +173,10 @@ def run_overload_spike(url: str, images: list[Path], clients: int, timeout: floa
         "status_200": count_200,
         "status_503": count_503,
         "unexpected_statuses": other,
-        "max_503_ms": round(max(ms_503), 1) if ms_503 else 0.0,
-        "pass": count_200 >= 1 and not other,
+        "max_503_ms": max_503_ms,
+        # The spike must prove back-pressure: some requests answered, the excess
+        # shed fast with 503s, no 500s, and no silent timeouts (status 0).
+        "pass": count_200 >= 1 and count_503 >= 1 and not other and max_503_ms < 2000,
     }
     print(json.dumps(row), flush=True)
     return row

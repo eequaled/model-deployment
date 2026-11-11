@@ -77,3 +77,26 @@ def test_png_header_only_bomb_triggers_413_on_app(tmp_path, monkeypatch):
         )
         assert resp.status_code == 413
         assert "pixel" in resp.json()["error"]
+
+
+def test_overload_spike_counts_timeouts_as_failures(tmp_path, monkeypatch):
+    """A client that times out must count against the step, not vanish from it."""
+    from bench import stress
+
+    image = tmp_path / "a.png"
+    image.write_bytes(b"not really a png, never sent")
+
+    calls = []
+
+    def fake_request(url, path, method="GET", body=None, headers=None, timeout=30.0):
+        calls.append(path)
+        if len(calls) % 2 == 0:
+            raise TimeoutError("no answer within the budget")
+        return 200, {"text": "ok"}, 1.0
+
+    monkeypatch.setattr(stress, "raw_request", fake_request)
+    row = stress.run_overload_spike("http://localhost:8000", [image], clients=4, timeout=1.0)
+
+    assert len(row["unexpected_statuses"]) + row["status_200"] + row["status_503"] == 4
+    assert 0 in row["unexpected_statuses"], "timeouts must be recorded as status 0"
+    assert row["pass"] is False
