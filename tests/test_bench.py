@@ -7,7 +7,9 @@ succeeded, and the rate itself counts successes, not attempts.
 
 from __future__ import annotations
 
-from bench.load import percentile, summarize
+from pathlib import Path
+
+from bench.load import open_loop, percentile, summarize
 
 
 def test_percentile_handles_empty_and_short_samples():
@@ -31,4 +33,25 @@ def test_a_step_below_99_percent_scores_zero_throughput(capsys):
     row = summarize("step", [1.0] * 98, 2, 10.0)
     assert row["success_rate"] == 0.98
     assert row["sustained_rps"] == 0.0
+    capsys.readouterr()
+
+
+def test_open_loop_dispatches_at_target_rate_and_records_target(capsys):
+    seen = []
+
+    def fake_sender(url: str, image: Path, timeout: float) -> None:
+        seen.append(image.name)
+
+    row = open_loop(
+        "http://localhost:8000",
+        [Path("a.png"), Path("b.png")],
+        rate=20.0,
+        seconds=0.25,
+        timeout=1.0,
+        sender=fake_sender,
+    )
+    assert row["target_rps"] == 20.0
+    assert row["ok"] == len(seen) >= 3
+    assert row["errors"] == 0
+    assert row["sustained_rps"] > 0.0
     capsys.readouterr()
