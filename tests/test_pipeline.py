@@ -98,3 +98,24 @@ def test_unknown_prefill_mode_fails_at_startup(tiny_model_dir):
 
     with pytest.raises(RuntimeError, match="prefill_mode"):
         FlorenceOCR(tiny_model_dir, threads=1, prefill_mode="bogus")
+
+
+def test_cgroup_cpu_quota_and_thread_resolution(tmp_path):
+    from server.ocr_engine import cgroup_cpu_quota, resolve_ort_threads
+
+    v2 = tmp_path / "cpu.max"
+    v2.write_text("400000 100000\n", encoding="utf-8")
+    assert cgroup_cpu_quota(v2_path=v2) == 4
+    v2.write_text("max 100000\n", encoding="utf-8")
+    assert cgroup_cpu_quota(v2_path=v2, v1_quota=tmp_path / "none", v1_period=tmp_path / "none") is None
+
+    # Explicit ORT_THREADS always wins; otherwise divide the quota across workers.
+    assert resolve_ort_threads(6, workers=2, quota=4) == 6
+    assert resolve_ort_threads(0, workers=1, quota=4) == 4
+    assert resolve_ort_threads(0, workers=2, quota=4) == 2
+    assert resolve_ort_threads(0, workers=1, quota=0) == 0
+
+
+def test_warmup_runs_short_pass(engine):
+    elapsed_ms = engine.warmup()
+    assert elapsed_ms >= 0.0

@@ -104,3 +104,28 @@ def test_decompression_bomb_is_a_json_413(client, monkeypatch):
     assert stub.seen == []  # rejected before inference
     # the server is still healthy afterwards
     assert test_client.get("/health").status_code == 200
+
+
+def test_pixel_cap_rejects_large_dimensions_before_decode(client, monkeypatch):
+    test_client, stub = client
+    monkeypatch.setattr(app_module, "MAX_PIXELS", 1000)  # 64x32 = 2048 pixels > 1000
+    response = test_client.post("/ocr", files={"image": ("wide.png", png_bytes((64, 32)), "image/png")})
+    assert response.status_code == 413
+    assert "pixel" in response.json()["error"]
+    assert stub.seen == []
+
+
+def test_lifespan_runs_engine_warmup(monkeypatch):
+    warmed = []
+
+    class WarmStub(StubEngine):
+        def warmup(self) -> float:
+            warmed.append(True)
+            return 1.0
+
+    stub = WarmStub()
+    monkeypatch.setattr(app_module, "WARMUP", True)
+    monkeypatch.setattr(app_module, "build_engine", lambda: stub)
+    with TestClient(app_module.app) as test_client:
+        assert warmed == [True]
+        assert test_client.get("/health").status_code == 200

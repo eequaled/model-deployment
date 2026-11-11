@@ -36,8 +36,10 @@ THREADS = int(os.getenv("ORT_THREADS", "0"))
 WORKERS = int(os.getenv("OCR_WORKERS", "1"))
 QUEUE_LIMIT = int(os.getenv("QUEUE_LIMIT", "8"))
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MAX_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000)))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "0"))
 PREFILL_MODE = os.getenv("PREFILL_MODE", "")
+WARMUP = os.getenv("WARMUP", "1") != "0"
 
 
 class State:
@@ -52,15 +54,18 @@ state = State()
 def build_engine() -> FlorenceOCR:
     """Constructed once at startup. Tests patch this to avoid needing weights."""
     return FlorenceOCR(MODEL_DIR, threads=THREADS, max_new_tokens=MAX_NEW_TOKENS,
-                       prefill_mode=PREFILL_MODE)
+                       prefill_mode=PREFILL_MODE, workers=WORKERS)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state.engine = build_engine()
+    if WARMUP and hasattr(state.engine, "warmup"):
+        state.engine.warmup()
     state.pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="ocr")
     state.slots = asyncio.Semaphore(WORKERS + QUEUE_LIMIT)
-    logger.info("ready: workers=%d queue=%d threads=%s", WORKERS, QUEUE_LIMIT, THREADS or "auto")
+    logger.info("ready: workers=%d queue=%d threads=%s", WORKERS, QUEUE_LIMIT,
+                getattr(state.engine, "threads", THREADS) or "auto")
     try:
         yield
     finally:
@@ -80,6 +85,11 @@ async def health() -> dict[str, str]:
 
 def _decode_image(payload: bytes) -> Image.Image:
     image = Image.open(io.BytesIO(payload))
+    width, height = image.size
+    if MAX_PIXELS > 0 and width * height > MAX_PIXELS:
+        raise Image.DecompressionBombError(
+            f"image dimensions {width}x{height} ({width * height} pixels) exceed limit {MAX_PIXELS}"
+        )
     image.load()
     return image
 

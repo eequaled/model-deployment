@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -40,6 +41,54 @@ from tokenizers import Tokenizer
 logger = logging.getLogger(__name__)
 
 PREFILL_MODES = ("prompt", "last", "start", "prompt_start")
+
+
+def cgroup_cpu_quota(
+    v2_path: Path = Path("/sys/fs/cgroup/cpu.max"),
+    v1_quota: Path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    v1_period: Path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+) -> int | None:
+    """Return the container CPU limit as an integer core count, or None if unlimited.
+
+    Docker's `--cpus=4` sets a cgroup quota rather than a CPU affinity mask, so
+    `os.cpu_count()` inside the container still reports all host threads. Reading the
+    quota lets us size the intra-op pool to the CPUs the container is actually allowed
+    to burn instead of oversubscribing the host count.
+    """
+    try:
+        if v2_path.exists():
+            parts = v2_path.read_text(encoding="utf-8").strip().split()
+            if len(parts) == 2 and parts[0] != "max":
+                quota, period = int(parts[0]), int(parts[1])
+                if quota > 0 and period > 0:
+                    return max(1, quota // period)
+        if v1_quota.exists() and v1_period.exists():
+            quota = int(v1_quota.read_text(encoding="utf-8").strip())
+            period = int(v1_period.read_text(encoding="utf-8").strip())
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def resolve_ort_threads(configured: int, workers: int = 1, quota: int | None = None) -> int:
+    """Pick the per-session intra-op thread count.
+
+    An explicit `ORT_THREADS > 0` always wins. When `ORT_THREADS == 0`, keep ORT's
+    own default (`0`, which uses physical cores and enables thread affinity) on an
+    unconstrained single-worker host, but divide the active cgroup CPU quota (or host
+    core count when multiple workers share the process) across workers so concurrent
+    sessions do not oversubscribe the quota.
+    """
+    if configured > 0:
+        return configured
+    effective_quota = cgroup_cpu_quota() if quota is None else quota
+    if effective_quota is not None and effective_quota > 0:
+        return max(1, effective_quota // max(1, workers))
+    if workers > 1:
+        return max(1, (os.cpu_count() or 1) // workers)
+    return 0
 
 
 def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
@@ -55,7 +104,7 @@ def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
 
 class FlorenceOCR:
     def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0,
-                 prefill_mode: str = "") -> None:
+                 prefill_mode: str = "", workers: int = 1) -> None:
         self.model_dir = Path(model_dir)
         self.meta = json.loads((self.model_dir / "meta.json").read_text(encoding="utf-8"))
         self.tokenizer = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
@@ -76,7 +125,7 @@ class FlorenceOCR:
             )
         self.start_ids = np.asarray([[self.start_id]], dtype=np.int64)
 
-        self.threads = threads
+        self.threads = resolve_ort_threads(threads, workers=workers)
         self.sessions = self._load_sessions()
         self.prefill_outputs = [o.name for o in self.sessions["decoder_prefill"].get_outputs()]
         self.prefill_inputs = [i.name for i in self.sessions["decoder_prefill"].get_inputs()]
@@ -96,6 +145,25 @@ class FlorenceOCR:
         )
         self._check_cache_contract()
 
+        # Precompute the static prompt and start-token embeddings (~33 KB total) and
+        # the present->past slot mappings once at startup so neither is recomputed on
+        # every request or every token.
+        self._prompt_embeds = self._run("embed_tokens", {"input_ids": self.prompt_ids})[0]
+        self._start_embeds = self._run("embed_tokens", {"input_ids": self.start_ids})[0]
+        step_input_set = set(self.step_inputs)
+        self._prefill_cache_map = [
+            (idx, "past_key_values." + name[len("present."):])
+            for idx, name in enumerate(self.prefill_outputs)
+            if name.startswith("present.")
+            and ("past_key_values." + name[len("present."):]) in step_input_set
+        ]
+        self._step_cache_map = [
+            (idx, "past_key_values." + name[len("present."):])
+            for idx, name in enumerate(self.step_outputs)
+            if name.startswith("present.")
+            and ("past_key_values." + name[len("present."):]) in step_input_set
+        ]
+
         expected = self.meta.get("image_tokens")
         if expected is not None:
             declared = self.image_tokens_from_graph()
@@ -114,7 +182,10 @@ class FlorenceOCR:
         options.inter_op_num_threads = 1
         # Fixed encoder length and a single image per request: let ORT keep memory
         # low instead of scaling for the worst case.
-        options.enable_cpu_mem_arena = True
+        options.enable_cpu_mem_arena = os.getenv("ORT_MEM_ARENA", "1") != "0"
+        spinning = os.getenv("ORT_ALLOW_SPINNING", "").strip()
+        if spinning in ("0", "1"):
+            options.add_session_config_entry("session.intra_op.allow_spinning", spinning)
         sessions = {}
         started = time.perf_counter()
         for name in (
@@ -128,7 +199,8 @@ class FlorenceOCR:
             sessions[name] = ort.InferenceSession(
                 str(path), sess_options=options, providers=["CPUExecutionProvider"]
             )
-        logger.info("loaded 5 sessions in %.1fs", time.perf_counter() - started)
+        logger.info("loaded 5 sessions in %.1fs (intra_op_threads=%s)",
+                    time.perf_counter() - started, self.threads or "auto")
         return sessions
 
     def _check_cache_contract(self) -> None:
@@ -193,10 +265,9 @@ class FlorenceOCR:
             return prompt_embeds
         if self.prefill_mode == "last":
             return prompt_embeds[:, -1:, :]
-        start = self._run("embed_tokens", {"input_ids": self.start_ids})[0]
         if self.prefill_mode == "start":
-            return start
-        return np.concatenate([prompt_embeds, start], axis=1).astype(np.float32)
+            return self._start_embeds
+        return np.concatenate([prompt_embeds, self._start_embeds], axis=1).astype(np.float32)
 
     def step_feed(self, mask: np.ndarray, token: int, cache: dict[str, np.ndarray],
                   encoder_states: np.ndarray) -> dict[str, np.ndarray]:
@@ -221,12 +292,25 @@ class FlorenceOCR:
             raise RuntimeError(f"step graph wants inputs this server does not provide: {missing}")
         return feed
 
-    def generate(self, image) -> tuple[str, dict[str, float]]:
+    def warmup(self) -> float:
+        """Run one short pass through every session before /health reports ready.
+
+        Two tokens is enough to touch vision_encoder, encoder_model, decoder_prefill,
+        embed_tokens and decoder_step so ORT's memory arena and kernel plans are warm
+        before the first timed request arrives.
+        """
+        started = time.perf_counter()
+        self.generate(Image.new("RGB", (64, 64), (255, 255, 255)), max_tokens=2)
+        elapsed_ms = round(1000 * (time.perf_counter() - started), 1)
+        logger.info("warmed up all sessions in %.1fms", elapsed_ms)
+        return elapsed_ms
+
+    def generate(self, image, max_tokens: int = 0) -> tuple[str, dict[str, float]]:
         started = time.perf_counter()
         pixel_values = self.preprocess(image)
 
         image_features = self._run("vision_encoder", {"pixel_values": pixel_values})[0]
-        prompt_embeds = self._run("embed_tokens", {"input_ids": self.prompt_ids})[0]
+        prompt_embeds = self._prompt_embeds
         merged = np.concatenate([image_features, prompt_embeds], axis=1).astype(np.float32)
         encoder_length = merged.shape[1]
         # The step graph broadcasts this mask against the cached cross-attention
@@ -252,15 +336,30 @@ class FlorenceOCR:
                 self.prefill_embeds_input: self.prefill_embeds(prompt_embeds),
             },
         )
-        cache = dict(zip(self.prefill_outputs[1:], outputs[1:]))
         tokens = [int(outputs[0][0, -1].argmax())]
+        cap = max_tokens or self.max_new_tokens
 
-        while tokens[-1] != self.eos_id and len(tokens) < self.max_new_tokens:
-            # The embedding lookup happens inside the step graph now, so this is a
-            # token id rather than a 768-float tensor.
-            outputs = self._run("decoder_step", self.step_feed(mask, tokens[-1], cache, encoder_states))
-            tokens.append(int(outputs[0][0, -1].argmax()))
-            cache.update(zip(self.step_outputs[1:], outputs[1:]))
+        if tokens[-1] != self.eos_id and len(tokens) < cap:
+            # Build the step feed once: the 12 cross-attention tensors never change
+            # mid-request, so each step only swaps in the 12 updated self-attention
+            # tensors and the new token embedding.
+            feed: dict[str, np.ndarray] = {"encoder_attention_mask": mask}
+            if "encoder_hidden_states" in self.step_inputs:
+                feed["encoder_hidden_states"] = encoder_states
+            for out_idx, past_name in self._prefill_cache_map:
+                feed[past_name] = outputs[out_idx]
+            token_ids = np.empty((1, 1), dtype=np.int64)
+
+            while tokens[-1] != self.eos_id and len(tokens) < cap:
+                token_ids[0, 0] = tokens[-1]
+                if self.step_embeds_input:
+                    feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
+                if "input_ids" in self.step_inputs:
+                    feed["input_ids"] = token_ids
+                outputs = self._run("decoder_step", feed)
+                tokens.append(int(outputs[0][0, -1].argmax()))
+                for out_idx, past_name in self._step_cache_map:
+                    feed[past_name] = outputs[out_idx]
 
         text = decode_pure_text(self.tokenizer, tokens)
         finished = time.perf_counter()
