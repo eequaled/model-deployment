@@ -47,14 +47,16 @@ curl http://localhost:8000/health
 together** from the CPU index, then `timm`/`einops`/`onnx`:
 
 ```dockerfile
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+      "torch==2.5.1" "torchvision==0.20.1" \
     && pip install "transformers==4.48.3" "onnx==1.17.0" "safetensors" \
        "pillow" "numpy" "huggingface_hub" "timm" "einops"
 ```
 
 Installing CPU `torch` alone lets `timm` pull a mismatched PyPI `torchvision`, and
 the export dies with `RuntimeError: operator torchvision::nms does not exist`. The
-pair has to come from the same index.
+pair has to come from the same index, and it is pinned so a future build cannot
+silently resolve a torch that the export code has never been tested against.
 
 ## How the model runs
 

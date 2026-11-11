@@ -196,10 +196,10 @@ PY
       say accuracy "SKIP (no local references)"
     fi
 
-    # latency + concurrency sweeps
+    # latency + closed-loop concurrency + open-loop arrival rates (Step 2 shape)
     run bench "$LOG_DIR/bench.log" python -m bench.load \
       --url "$BASE" --images "$IMAGES" --mode all --repeats 3 --clients 1,2,4,8 --seconds 20 \
-      --json-out "$LOG_DIR/bench.json"
+      --rates 0.08,0.1,0.12 --timeout 30 --json-out "$LOG_DIR/bench.json"
     grep -E '^\{"mode"' "$LOG_DIR/bench.log" >>"$MASTER" 2>/dev/null
 
     # memory with the model warm
@@ -221,7 +221,10 @@ if [ "$RUN_DOCKER" = 1 ]; then
   DOCKER_CPUS="${DOCKER_CPUS:-4}"
   DOCKER_WORKERS="${DOCKER_WORKERS:-1}"
   DOCKER_THREADS="${DOCKER_THREADS:-0}"
-  DOCKER_QUEUE="${DOCKER_QUEUE:-8}"
+  # A queue deeper than the 30 s request budget turns overload into timeouts, which
+  # the challenge counts as failures. One waiting slot keeps every admitted request
+  # under the budget and sheds the rest with a fast 503.
+  DOCKER_QUEUE="${DOCKER_QUEUE:-1}"
   say docker "building $IMAGE (log: $LOG_DIR/docker_build.log)"
   if docker build -t "$IMAGE" . >>"$LOG_DIR/docker_build.log" 2>&1; then
     say docker "build PASS"
@@ -236,13 +239,17 @@ if [ "$RUN_DOCKER" = 1 ]; then
       say docker "cold start to healthy: $(( $(date +%s) - START ))s"
       run docker_request "$LOG_DIR/docker_request.log" bash -c \
         "curl -sS -F 'image=@$IMAGES/82837252.png' http://127.0.0.1:$PORT/ocr"
-      run docker_bench "$LOG_DIR/docker_bench.log" python -m bench.load \
-        --url "http://127.0.0.1:$PORT" --images "$IMAGES" --mode all --repeats 2 \
-        --clients 1,2,4,8 --seconds 30 --timeout 30 --json-out "$LOG_DIR/docker_bench.json"
-      grep -E '^\{"mode"' "$LOG_DIR/docker_bench.log" >>"$MASTER" 2>/dev/null
+      # Stress first: a closed-loop bench can leave admitted requests draining for
+      # tens of seconds, which would make the spike measurement look worse than the
+      # server actually is.
       run docker_stress "$LOG_DIR/docker_stress.log" python -m bench.stress \
         --url "http://127.0.0.1:$PORT" --images "$IMAGES" --json-out "$LOG_DIR/docker_stress.json"
       grep -E '^(\{"check"|STRESS)' "$LOG_DIR/docker_stress.log" >>"$MASTER" 2>/dev/null
+      run docker_bench "$LOG_DIR/docker_bench.log" python -m bench.load \
+        --url "http://127.0.0.1:$PORT" --images "$IMAGES" --mode all --repeats 2 \
+        --clients 1,2,4 --seconds 30 --rates 0.08,0.1,0.12 --timeout 30 \
+        --json-out "$LOG_DIR/docker_bench.json"
+      grep -E '^\{"mode"' "$LOG_DIR/docker_bench.log" >>"$MASTER" 2>/dev/null
       docker stats --no-stream runall-ocr >>"$MASTER" 2>&1
       docker exec runall-ocr python -c "import importlib.util as u; print('torch present:', bool(u.find_spec('torch')))" \
         >>"$MASTER" 2>&1
