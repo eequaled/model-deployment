@@ -37,6 +37,7 @@ def summarize(
     errors: int,
     elapsed: float,
     target_rps: float | None = None,
+    rate_window: float | None = None,
 ) -> dict:
     """One row per step, in the shape the challenge scores.
 
@@ -48,7 +49,10 @@ def summarize(
     ok = len(latencies)
     requests = ok + errors
     success_rate = ok / requests if requests else 0.0
-    rps = ok / elapsed if elapsed else 0.0
+    # A step's rate is completions over the window requests were dispatched in, not
+    # over the wall clock that also includes draining the last in-flight request.
+    rate_elapsed = rate_window if rate_window and rate_window > 0 else elapsed
+    rps = ok / rate_elapsed if rate_elapsed else 0.0
     row = {
         "mode": name,
         "requests": requests,
@@ -140,9 +144,11 @@ def open_loop(
     total = max(1, int(round(rate * seconds)))
     max_workers = max(4, min(64, int(rate * timeout) + 4))
 
-    def one(image: Path) -> None:
+    def one(image: Path, submitted: float) -> None:
         nonlocal errors
-        t0 = time.perf_counter()
+        # Time from the scheduled send, not from when a pool worker happened to pick
+        # the task up: client-side queueing is part of the latency the organizer sees.
+        t0 = submitted
         try:
             sender(url, image, timeout)
             with lock:
@@ -152,6 +158,7 @@ def open_loop(
                 errors += 1
 
     started = time.perf_counter()
+    dispatch_end = started
     futures = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for index in range(total):
@@ -161,11 +168,18 @@ def open_loop(
                 time.sleep(wait)
             if time.perf_counter() >= started + seconds and index > 0:
                 break
-            futures.append(pool.submit(one, images[index % len(images)]))
+            submitted = time.perf_counter()
+            futures.append(pool.submit(one, images[index % len(images)], submitted))
+            dispatch_end = submitted
         for future in futures:
             future.result()
     elapsed = time.perf_counter() - started
-    return summarize(f"open_{rate:g}rps", latencies, errors, elapsed, target_rps=rate)
+    # The step window ends one interval after the last send; cap it at the requested
+    # duration so a short step cannot report a rate above its target.
+    window = min(seconds, max(interval, dispatch_end - started + interval))
+    return summarize(
+        f"open_{rate:g}rps", latencies, errors, elapsed, target_rps=rate, rate_window=window
+    )
 
 
 def main() -> int:
