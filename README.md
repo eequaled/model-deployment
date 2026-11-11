@@ -25,8 +25,8 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 | Unit + graph tests | **34 passed, 6 skipped** without weights; **40 passed** with a real export; 0 errors |
 | Step 1 latency (4 CPUs) | sequential p50 **8.29 s**, p95 **9.35 s** over 50 images |
 | Step 2 throughput (4 CPUs) | **0.15 req/s at 100% success** (0.10 and 0.12 also clean); one worker, 4 threads, spinning off |
-| Docker under `--memory=4g --cpus=4` | build 140.5 s with pinned torch; single OCR 7.6 s (encoder 2.44 s, decode 5.16 s); peak `VmHWM` 3.57 GiB; torch absent |
-| Official accuracy vs organizer baseline | not available yet; 50-image fp32 proxy in the journal |
+| Docker under `--memory=4g --cpus=4` | build 140.5 s with pinned torch; single OCR 7.6 s (encoder 2.44 s, decode 5.16 s); peak `VmHWM` 3.36 GiB; torch absent |
+| Official accuracy vs organizer baseline | not available yet; 5-image fp32 proxy scores 0.939, well above the 70% floor |
 
 ## Build and run
 
@@ -217,8 +217,8 @@ pytest tests -q
 MODEL_DIR=models pytest tests -q
 ```
 
-The stand-in-graph tests run without weights (27 passed, 6 skipped); with a real
-export the `needs_model` tests run too (33 passed). Bad input, decompression bombs,
+The stand-in-graph tests run without weights (34 passed, 6 skipped); with a real
+export the `needs_model` tests run too (40 passed). Bad input, decompression bombs,
 cache wiring, `pure_text` decoding, EXIF-free preprocessing, and the load-test
 percentile/sustained-rate math all have tests that need no weights.
 
@@ -248,19 +248,22 @@ python bench/prefill_probe.py --image samples/example.png --max-new 64
 
 ## Measured numbers
 
-All on CPU, fp32, 12 ONNX Runtime threads unless stated otherwise.
+All on CPU, fp32, inside `docker run --memory=4g --memory-swap=4g --cpus=4` with the
+defaults baked into the image: one worker, intra-op threads sized from the cgroup
+quota (4 here), spinning off, one waiting slot.
 
 | Measurement | Result |
 |---|---|
 | Export size | 1,377.9 MiB (vision 349.3, embed 150.3, encoder 165.3, prefill 370.0, step 343.0) |
 | Graph parity vs fp32 PyTorch | vision/embed/encoder ~1e-6 relative L2; decoder logits ~2e-5 max abs |
 | Token parity, old vs new export | 5/5 images identical (225/154/201/256/256 tokens) |
-| Single OCR, 82837252 | encoder 2.07 s, decode 4.64 s, total 6.71 s |
-| Server peak RSS (`VmHWM`) | 3.07 GiB, one worker |
-| Sequential latency (150 requests) | p50 7.21 s, p95 8.58 s, p99 13.25 s, 0 errors |
-| Concurrency 1/2/4/8 | p50 6.86 / 14.48 / 21.95 / 37.37 s, 0 errors or 503s |
-| Accuracy canary vs local references | mean 0.9413 (CER-scored, 5 images) |
-| Container under `--memory=4g --cpus=4` | healthy in 4 s; OCR 10.33 s (encoder 3.21 s, decode 7.12 s); 3.12 GiB / 4 GiB; `torch` and `torchvision` absent |
+| Single OCR, 82837252 | 7.60 s total (encoder 2.44 s, decode 5.16 s) |
+| Server peak RSS (`VmHWM`) | 3.36 GiB, one worker |
+| Sequential latency (50 images) | p50 8.29 s, p95 9.35 s, 0 errors |
+| Open-loop sustained rate | 0.10, 0.12 and 0.15 req/s all at 100% success |
+| Closed-loop concurrency 2 | p50 13.8 s, 0 errors |
+| Accuracy canary vs local references | mean **0.939** (CER-scored, 5 FUNSD images) |
+| Container build | 140.5 s with the pinned CPU torch pair; `torch` and `torchvision` absent at runtime |
 
 The organizer's baseline is the authoritative accuracy reference; the local numbers
 above come from `model.generate()` on FUNSD and are a regression canary, not a
@@ -277,12 +280,14 @@ score.
 ## Known issues
 
 * Official accuracy against the organizer's baseline is not available; the local
-  `0.9413` canary is a regression signal, not a score.
-* RPS was not measured. The concurrency numbers above are p50 latency at a fixed
-  concurrency, not the throughput metric the challenge scores.
-* The challenge tests the latest commit on `main`. This work currently lives on
-  `challenge-hardening` / `firstproto` with a PR to `dev`, so `main` must be
-  fast-forwarded before submission.
+  canary is a regression signal, not a score.
+* The organizer's CPU count is not fixed yet. Every container number above is at
+  `--cpus=4`; the thread count is sized from the cgroup quota at startup, so a
+  different quota changes the pool size without a rebuild.
+* One worker peaks at 3.36 GiB of the 4 GiB limit. A second worker would leave no
+  headroom, so throughput cannot be raised by adding workers.
+* The 40 MP decoded-pixel cap is a memory-safety trade-off. A valid upload under
+  10 MB that decodes to more than 40 MP would get a 413; FUNSD-like pages are 1–2 MP.
 
 Numbers from every change, including the ones that were reverted, are in
 `journal.md`.

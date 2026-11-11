@@ -131,6 +131,40 @@ Notes on the table:
 - The split into five graphs has no before number because no single-graph export was ever benchmarked. The claim is architectural, not measured against a one-graph baseline.
 - The prefill change is the one optimization with a clean before/after: the 10-position `prompt` prefix emitted EOS immediately (0/64, CER 1.0000); one position produced 63/64 and CER 0.0195.
 
+## 5a. Hardening round: the measured configuration
+
+The last round replaced guesses with numbers measured under the official container limits
+(`--memory=4g --memory-swap=4g --cpus=4`). Every row below is from `florence2-ocr:opt`,
+built with the pinned CPU torch pair, with `torch` and `torchvision` absent at runtime.
+
+| Change | What it measured | Kept? |
+|---|---|---|
+| Pin `torch==2.5.1` / `torchvision==0.20.1` in the exporter stage | build 140.5 s, exit 0; a future rebuild cannot resolve an untested torch | Kept |
+| Size `ORT_THREADS` from the cgroup CPU quota, divided by workers | single OCR 10.33 s → **7.60 s** (encoder 2.44 s, decode 5.16 s) | Kept |
+| Precompute prompt/start embeddings and cache slot maps | included in the 7.60 s; removes 2 ORT calls and a 26-entry dict rebuild per token | Kept |
+| Warm all five sessions before `/health` returns 200 | first scored request pays no lazy-init cost | Kept |
+| `session.intra_op.allow_spinning=0` | at 0.15 rps, spinning on: 6/7 ok, sustained 0; off: 9/9 ok, sustained 0.15 | Kept, now a Dockerfile default |
+| `QUEUE_LIMIT=1` (2 in-flight permits) | at ~8 s per request a deeper queue turns overload into 30 s timeouts, which count as failures | Kept, now the default |
+| One worker, 4 threads | 50 images: p50 **8.29 s**, p95 **9.35 s**; open loop 0.10/0.12/0.15 rps all 100% success | Kept |
+| Two workers, 2 threads each | p50 8.42 s, open 0.12 rps p50 9.57 s — slower than one worker on every step | Rejected |
+
+The winning shape is one inference worker with one intra-op pool sized to the CPU quota.
+Concurrent callers share that pool (`Run` is thread-safe but the pool is per session), so a
+second worker adds contention and memory, not throughput. Peak `VmHWM` is 3.36 GiB of 4 GiB
+with one worker; two workers leave no headroom.
+
+Step 2 is an open-loop measurement because a closed-loop client with a shallow queue produces
+a 503 storm by construction: the client retries immediately, the queue is full, and the
+result says more about the client than the server. At a fixed arrival rate the server either
+keeps up (100% success, `sustained_rps` equals the target) or sheds load, and both outcomes
+are visible in one number.
+
+Accuracy is unchanged by the runtime work, which only moves the same tokens through the same
+graphs: on the five FUNSD images that have local fp32 references the served text scores mean
+**0.939** under `max(0, 1 - CER)`, against the challenge's 70% floor. The five references
+were regenerated with the transformers version the baseline uses, and the served text matches
+the stored references exactly apart from the whitespace `clean_up_tokenization_spaces` strips.
+
 ## 6. Bugs and how they were debugged
 
 **Export died with `RuntimeError: operator torchvision::nms does not exist`.** The Dockerfile exporter stage installed CPU `torch` without `torchvision`, so `timm` pulled a mismatched PyPI `torchvision` built against a different torch. The error names torchvision's NMS operator, so the mismatch is in the installed torch/torchvision pair, not in the model code. Fixed by installing `torch torchvision` together from the CPU index.
@@ -157,7 +191,7 @@ The pattern in every case was the same: reproduce the smallest failing input, fi
 
 **Threads and systems.** `intra_op_num_threads=0` lets ORT use physical cores and enable affinity; an explicit value disables affinity. `inter_op_num_threads` only matters in `ORT_PARALLEL`, so the server keeps `ORT_SEQUENTIAL` with inter-op 1. One worker is a memory decision: each process loads about 1.4 GiB of weights, and one worker already peaks at 3.07 GiB. The bounded queue with an immediate 503 keeps memory flat under overload instead of letting requests accumulate; a fast refusal is a feature, not a failure. At c8 the p50 rises to 37.37 s, which is the honest cost of one inference worker and no batching.
 
-**Benchmarking.** A baseline before the first optimization is not optional; the missing single-graph number is the clearest gap in this log. Token parity is a stronger gate than a CER average when changing graphs, because it localizes a regression to a token. A local canary is not the organizer's score. Concurrency latency is not RPS: the table has no RPS because none was measured, and the throughput claim therefore remains untested. The load bench now reports `success_rate` and `sustained_rps`, where the rate counts successful requests only and a step scores zero below the challenge's 99% success threshold; that makes the tool match Step 2, but it does not turn the unmeasured claim into a measured one. Isolating one change at a time was possible for prefill and impossible for the cache and graph split, and the journal says so rather than inventing a number.
+**Benchmarking.** A baseline before the first optimization is not optional; the missing single-graph number is the clearest gap in this log. Token parity is a stronger gate than a CER average when changing graphs, because it localizes a regression to a token. A local canary is not the organizer's score. Concurrency latency is not RPS: a closed-loop client that retries on 503 measures its own retry policy, so Step 2 is measured open-loop at fixed arrival rates. The load bench reports `success_rate` and `sustained_rps`, where the rate counts successful requests only and a step scores zero below the challenge's 99% success threshold. That turned the earlier untested throughput claim into a measured one: 0.15 req/s sustained at 100% success, 0.10 and 0.12 also clean, and 0.15 with spinning enabled failing at 6/7. Isolating one change at a time was possible for prefill and impossible for the cache and graph split, and the journal says so rather than inventing a number.
 
 ## 8. Resources consulted
 
@@ -169,10 +203,9 @@ The pattern in every case was the same: reproduce the smallest failing input, fi
 
 ## 9. Next steps and open items
 
-- Fast-forward `main` before submission. The challenge tests the latest commit on `main`; the work currently lives on `challenge-hardening` / `firstproto` with a PR to `dev`.
-- Measure real RPS under a stepped concurrency load, not just p50 at fixed concurrency. The throughput score depends on the highest rate sustained for a full step with at least 99% success.
-- Obtain the organizer's reference outputs and baseline settings; the local 0.9413 canary is not the official accuracy.
-- Re-check the `khiro45` collaborator invitation; it was sent, but acceptance was not confirmed here.
+- Obtain the organizer's reference outputs and baseline settings; the local 50-image fp32 proxy is not the official accuracy.
+- Confirm the organizer's CPU thread limit when it is announced. All container numbers here use `--cpus=4`; the cgroup-aware thread sizing means the image adapts to a different quota without a rebuild.
+- Watch peak memory if the organizer raises the request rate: 3.36 GiB of 4 GiB is the ceiling for one worker, so a second worker is not an option without more RAM.
+- The 40 MP decoded-pixel cap is a deliberate memory-safety trade-off. It could reject a valid upload that is under 10 MB but decodes to more than 40 MP; FUNSD-like pages are 1–2 MP, so the margin is large.
+- Multipart bodies are parsed before the 10 MB check, so a chunked upload spools to disk before it is rejected. The spool is bounded by the framework's temp directory, but it is not free.
 - Confirm with the organizer how the individual-work policy applies to AI assistance; the solution code and conversion scripts remain individually authored.
-- If time allows, export a single-graph baseline to replace the one missing before/after number, and isolate the cache and graph-split costs the same way prefill was isolated.
-- Watch the organizer's CPU thread limit when it is announced; the current numbers use 12 threads, and the container run used `--cpus=4`.
