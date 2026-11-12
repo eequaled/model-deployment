@@ -6,9 +6,9 @@ A CPU-only OCR backend for Florence-2-base behind a FastAPI server using ONNX Ru
 
 ## The 5 graphs and why
 
-1. **Vision encoder** — DaViT, 768×768 → 577 visual tokens. FP32. Runs once per request. 1.59s.
-2. **Embed tokens** — 51,289×768 lookup table. In-memory NumPy slicing. 0.016ms/token.
-3. **Text encoder** — BART-style, 6 layers, 12 heads. Fuses 577 image + 10 prompt tokens = 587 positions. FP32 (or QUInt8 on VNNI). 0.19s.
+1. **Vision encoder** — DaViT, 768×768 → 577 visual tokens. FP32. Runs once per request. 1.59s. Kept at fp32 because fp8 fails on non-synthetic images.
+2. Embed tokens 51,289×768 lookup table. In-memory NumPy slicing. 0.016ms/token. Because leaving it as a model and retrieving it every time on the steps is redundant.
+3. **Text encoder** — 6 layers, 12 heads. Fuses 577 image + 10 prompt tokens = 587 positions. FP32 (or QUInt8 on VNNI). Left at fp32 because in Zen architecture I don't scrape much time. 14ms for a bad accuracy change. 0.19s.
 4. **Decoder prefill** — 1 position (start token). Returns logits + 24 cache tensors. FP32. 0.049s.
 5. **Decoder step** — one token per call, 200-256 times. Mixed INT4. 1.53s.
 
