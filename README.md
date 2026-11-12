@@ -191,6 +191,33 @@ Not adopted, with reasons:
 | `ORT_MEM_ARENA` | `1` | set to `0` to disable ORT's CPU memory arena |
 | `KEEP_ALIVE` | `30` | uvicorn keep-alive seconds |
 
+## Optimization decisions and rationale
+
+### 1. Why five graphs instead of fusing into 1 or 3
+Florence-2 decomposes naturally into five execution stages with distinct lifecycles and arithmetic intensities:
+- `vision_encoder.onnx`: Runs once per request on the image (compute-bound DaViT GEMM).
+- `embed_tokens.onnx`: Token ID lookup table (`Gather`). Running as its own graph avoids embedding a 151 MB table inside the decoding hot loop.
+- `encoder_model.onnx`: Runs once per request, fusing image tokens with task prompt tokens.
+- `decoder_prefill.onnx`: Runs once per request, computing the initial cross-attention KV cache.
+- `decoder_step.onnx`: The autoregressive hot loop running 200–256 times per document (memory-bandwidth bound GEMV).
+
+Splitting prefill and step avoids the 12 cross-cache passthrough copies incurred by merged `If` models (measured at 671.8 ms/page in naive implementations) and allows different precision strategies per stage.
+
+### 2. Can we use INT4? Where, and where NOT?
+- **Can we use INT4 on the Encoders / Prefill? No.** INT4 weights require dynamic bit-unpacking instructions on AVX2. When multiplying matrices (M=577), the unpacking overhead in software eats any bandwidth savings. On CPUs without AVX-VNNI (like Zen 2), INT4 matrix-matrix multiplication is actually slower than FP32.
+- **Can we use INT4 on `decoder_step`? Yes, in the transformer layers.** Because `decoder_step` is purely memory-bound (M=1), streaming 4-bit weights cuts bandwidth in half compared to 8-bit and by 4× compared to FP32:
+  - FP32: 343 MB × 255 tokens = 87.5 GB of RAM traffic per page (~4.7 s).
+  - INT8: 100 MB × 255 tokens = 25.5 GB of RAM traffic per page (~1.8 s, 133 tok/s).
+  - Mixed INT4: 76 MB × 255 tokens = 19.4 GB of RAM traffic per page (~1.4 s, 131+ tok/s).
+- **The catch with INT4:** The LM Head (768 × 51,289) projects hidden states to 51k vocabulary logits. In a small model like Florence-2 (230M params), 4-bit rounding errors on 51k outputs cause rare tokens to flip over 250 autoregressive steps. That's why the pure 4-bit LM head degraded text. The candidate solution is: 4-bit transformer layers + 8-bit LM head.
+
+### 3. What should stay at full precision (FP32 vs FP16)?
+- **Should anything be FP16? No.** On x86 CPUs (both AMD Zen 2 and Intel without AVX512-FP16), there is no native FP16 execution. ONNX Runtime's `CPUExecutionProvider` inserts `Cast(fp16 -> fp32)` before operations and `Cast(fp32 -> fp16)` after. ORT maintainers explicitly document that FP16 models run slower on x86 CPUs than FP32 models.
+- **What MUST stay FP32?**
+  - `embed_tokens.onnx` (151 MB): This is a lookup table (`Gather`), not a matrix multiplication. Looking up a single 3 KB token embedding takes 0.04 ms. Quantizing it does not accelerate compute and adds dequantization overhead.
+  - `decoder_prefill.onnx` (371 MB): Runs only once and takes only ~45 ms (1% of the request). Quantizing it saves ~10 ms at most, but keeping it in FP32 ensures the initial KV cache is generated with full numerical fidelity.
+  - `vision_encoder.onnx` (350 MB): Vision features (DaViT patch projections) are sensitive to small activation shifts (e.g. converting a letter A to F or - to :). Since it runs once, FP32 guarantees optical accuracy.
+
 ## Reproducing the model without Docker
 
 ```bash
