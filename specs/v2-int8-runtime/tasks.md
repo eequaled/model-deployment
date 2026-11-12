@@ -135,20 +135,25 @@
     - Left off: CPU saturation at batch 1 leaves no room for concurrent batching win on 4 CPUs
     - _Requirements: 9.1, 9.2, 9.3_
 
-- [ ] 9. Verify the submission
-  - [ ] 9.1 Build the image from a clean cache and assert no `torch`/`torchvision`,
+- [x] 9. Verify the submission
+  - [x] 9.1 Build the image from a clean cache and assert no `torch`/`torchvision`,
     `quant.json` present, and all nine model files load (five fp32, three int8, one
     int4)
+    - Exporter script runs quantization and decoder surgery during the build
     - _Requirements: 7.1, 7.2, 7.3_
-  - [ ] 9.2 Run the API contract tests and `bench.stress` against the winning
+  - [x] 9.2 Run the API contract tests and `bench.stress` against the winning
     container; confirm health, 400s, 413s, fast 503s, and no 500
+    - `bench.stress` passed: baseline 2244 ms, 400s on corrupt/empty/missing, 413s on
+      64MP/11MB, c10 overload gave 8 fast 503s (max 6.1 ms) and 2 200s, 0 500s
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 4.2_
-  - [ ] 9.3 Update `README.md` and `journal.md` with the measured V2 rows, the
+  - [x] 9.3 Update `README.md` and `journal.md` with the measured V2 rows, the
     precision defaults, the tokens-per-second and per-stage table, and the
     five-graph versus three-module rationale
+    - Added section 11 to `journal.md`, updated status table and documentation in `README.md`
     - _Requirements: 10.1, 10.2, 10.3, 11.5_
-  - [ ] 9.4 Run the full test suite with and without `MODEL_DIR`, then commit and
+  - [x] 9.4 Run the full test suite with and without `MODEL_DIR`, then commit and
     push `main`
+    - 50 passed / 6 skipped without weights; 56 passed with real export
     - _Requirements: 10.1_
 
 - [ ] 10. Optional probes, only after every gate above passes

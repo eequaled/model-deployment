@@ -19,14 +19,16 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 
 | Item | State |
 |---|---|
-| Export from pinned weights | verified: 5 graphs, **1,377.9 MiB**, `577 + 10 = 587` encoder length |
-| Token parity, old vs new graphs | **PASS**: 5/5 images token-identical (225/154/201/256/256) |
-| Prefill prefix | `start` matches `model.generate()`; `prompt`/`prompt_start` do not |
-| Unit + graph tests | **34 passed, 6 skipped** without weights; **40 passed** with a real export; 0 errors |
-| Step 1 latency (4 CPUs) | sequential p50 **8.29 s**, p95 **9.35 s** over 50 images |
-| Step 2 throughput (4 CPUs) | **0.15 req/s at 100% success** (0.10 and 0.12 also clean); one worker, 4 threads, spinning off |
-| Docker under `--memory=4g --cpus=4` | build 140.5 s with pinned torch; single OCR 7.6 s (encoder 2.44 s, decode 5.16 s); peak `VmHWM` 3.36 GiB; torch absent |
-| Official accuracy vs organizer baseline | not available yet; 5-image fp32 proxy scores 0.939, well above the 70% floor |
+| Model graphs & quantization | 5 graphs; `quant.json` provides `fp32`, `int8`, and `int4` variants |
+| Winning default precision | `PRECISION=auto` loads **8-bit MatMulNBits step graph (100 MB)** + fp32 prefill & encoders |
+| Decoder graph surgery | Cross-attention keys transposed once in prefill; 6 `Transpose` nodes removed from step |
+| Post-processing | `POSTPROCESS=baseline` replicates transformers tokenization whitespace cleanup |
+| Unit + integration tests | **50 passed, 6 skipped** without weights; **56 passed** with a real export; 0 errors |
+| Step 1 latency (4 CPUs, 50 docs) | sequential p50 **3.83 s**, p95 **4.20 s**, max 4.90 s (down from 8.29 s / 9.35 s in V1) |
+| Step 2 throughput (4 CPUs) | **0.25+ req/s sustained at 100% success** (measured clean up to 0.32 req/s) |
+| Decode rate | p50 **133.1 decode tokens/s**, mean **130.8** (total tok/s p50 64.8) |
+| Memory envelope | peak `VmHWM` **2.39 GiB** under load & overload spike (safe inside 4 GB limit) |
+| Accuracy vs local proxy | 50 FUNSD docs: **0.8753 mean accuracy** (within 0.0016 of fp32 baseline 0.8769) |
 
 ## Build and run
 

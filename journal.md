@@ -243,3 +243,47 @@ the same page lost 42 characters versus 2 for 8-bit. Speed does not decide this.
 to `int8`. fp16 is rejected: the CPU provider inserts fp16/fp32 casts and does not
 accelerate them. Triton is rejected in both senses: the NVIDIA server backend inherits
 ORT and adds no 4-bit CPU kernel, and OpenAI Triton is GPU-only/experimental on CPU.
+
+## 11. V2 implementation and measurements (2026-11-12)
+
+**1. Baseline Post-Processing Parity.**
+Implemented `clean_up_tokenization_spaces` in `server/ocr_engine.py` to match
+transformers' default post-processing. On the 50 FUNSD testing images:
+`pure_text` mean acc 0.8767, `baseline` mean acc 0.8769. Default set to `baseline`.
+
+**2. Quantization & Surgery.**
+- Graph surgery (`export/optimize_decoder.py`): prefill emits cross-attention keys
+  transposed once (`perm=[0, 2, 3, 1]`), step drops the 6 `Transpose_1` nodes that
+  previously ran on every single token.
+- Numerical equivalence verified in `tests/test_surgery.py` across fp32, int8, and
+  int4: max logits difference < 1e-4.
+- Quantization sweep on 50 documents:
+  - `fp32_baseline`: 0.8769 mean acc, 0.1299 min
+  - `step_8bit_clean` (`auto`): **0.8753 mean acc, 0.1299 min** (within 0.0016 of fp32)
+  - `step_4bit_mixed`: 0.7991 mean acc, 0.0603 min (rejected by 0.75 accuracy floor)
+  - `vision8_step8`: 0.7163 mean acc (rejected)
+  - `text_encoder int8`: 0.0563 mean acc (dynamic INT8 on BART text encoder destroys tokens)
+- Decision: `PRECISION=auto` loads weight-only 8-bit `decoder_step.int8.onnx` with
+  fp32 prefill and encoders.
+
+**3. Latency & Token Rates (50 real documents, 4 CPUs):**
+- Sequential p50: **3.83 s** (down from 8.29 s in V1, a **53.8% reduction**)
+- Sequential p95: **4.20 s** (down from 9.35 s in V1, a **55.1% reduction**)
+- Maximum latency: **4.90 s** (far below 30 s cutoff)
+- Decode tokens per second: p50 **133.1**, mean **130.8** (up from 54.6 in V1)
+- Total tokens per second: p50 **64.8**, mean **61.3**
+- Per-stage breakdown (p50):
+  - `vision_encoder`: 1636.7 ms
+  - `encoder_model`: 201.0 ms
+  - `decoder_prefill`: 50.2 ms
+  - `decoder_step`: 1896.3 ms
+
+**4. Throughput & Memory:**
+- Open-loop sustained RPS at 100% success rate:
+  - 0.10 target -> 0.10 sustained (100% success)
+  - 0.15 target -> 0.16 sustained (100% success)
+  - 0.20 target -> 0.20 sustained (100% success)
+  - 0.25 target -> 0.25 sustained (100% success)
+  - 0.30 target -> 0.32 sustained (100% success)
+- Overload protection: fast 503s verified (max 6.1 ms under 10-client spike; 0 errors, no 500s).
+- Peak memory (`VmHWM`): **2.39 GiB** under load & spike (well within 4 GB RAM limit).
