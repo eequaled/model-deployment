@@ -46,15 +46,16 @@
     - Assert 48 four-bit `MatMulNBits` nodes and one eight-bit LM-head node
     - _Requirements: 5.2, 5.6_
 
-- [ ] 4. Remove the per-step cross-key transposes
-  - [ ] 4.1 Write `export/optimize_decoder.py` for the split graphs: prefill emits
+- [x] 4. Remove the per-step cross-key transposes
+  - [x] 4.1 Write `export/optimize_decoder.py` for the split graphs: prefill emits
     `present.{i}.encoder.key` already transposed, step drops the six matching
     `Transpose` nodes and uses the past input directly
-    - Apply to the fp32, int8, and int4 step graphs; update `ValueInfo` shapes; run
-      `onnx.checker` on every edited model
+    - Applied to fp32, int8, and int4 step graphs and the fp32 prefill graph
+    - Updated `ValueInfo` and input/output shapes; `onnx.checker` verified
     - _Requirements: 6.1, 6.2_
-  - [ ] 4.2 Add a tiny-model test that compares step logits before and after surgery
+  - [x] 4.2 Add a tiny-model test that compares step logits before and after surgery
     within `1e-4`, for fp32, int8, and int4 files
+    - Written in `tests/test_surgery.py`; verified all 3 variants match within 1e-4
     - _Requirements: 6.3, 6.4_
 
 - [ ] 5. Teach the engine to choose precision and post-processing
