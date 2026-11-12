@@ -119,3 +119,23 @@ def test_cgroup_cpu_quota_and_thread_resolution(tmp_path):
 def test_warmup_runs_short_pass(engine):
     elapsed_ms = engine.warmup()
     assert elapsed_ms >= 0.0
+
+
+def test_embed_table_numpy_lookup_and_fallback(tiny_model_dir):
+    from server.ocr_engine import FlorenceOCR
+
+    # Without embed_tokens.npy: engine falls back to ONNX session
+    eng_fallback = FlorenceOCR(tiny_model_dir, threads=1)
+    assert eng_fallback.embed_table is None
+    text1, timings1 = eng_fallback.generate(Image.new("RGB", (64, 64), (255, 255, 255)), max_tokens=2)
+    assert text1
+
+    # With embed_tokens.npy: engine uses NumPy array slicing
+    table = np.zeros((32, 768), dtype=np.float32)
+    np.save(tiny_model_dir / "embed_tokens.npy", table)
+    eng_npy = FlorenceOCR(tiny_model_dir, threads=1)
+    assert eng_npy.embed_table is not None
+    assert eng_npy.embed_table.shape == (32, 768)
+    text2, timings2 = eng_npy.generate(Image.new("RGB", (64, 64), (255, 255, 255)), max_tokens=2)
+    assert text2
+

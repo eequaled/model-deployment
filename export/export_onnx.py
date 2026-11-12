@@ -33,6 +33,7 @@ import shutil
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -231,6 +232,9 @@ def main() -> None:
     print(f"encoder sequence length for OCR: {image_tokens} image tokens + {len(prompt_ids)} prompt = {encoder_len}")
 
     embeddings = language_model.get_input_embeddings()
+    embed_weights = embeddings.weight.detach().cpu().numpy()
+    np.save(out / "embed_tokens.npy", embed_weights)
+    print(f"  embed_tokens.npy: shape {embed_weights.shape}, dtype {embed_weights.dtype}")
 
     print("exporting graphs")
     export(

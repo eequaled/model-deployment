@@ -132,12 +132,18 @@ def load_precision_files(models_dir: Path, requested: str = "auto",
     manifest_path = models_dir / "quant.json"
     target_var = requested
     if requested == "auto":
-        # Default auto resolves to int8 until 4-bit is proven across the full gate
-        target_var = "int8" if manifest_path.exists() else "fp32"
+        target_var = "int4" if manifest_path.exists() else "fp32"
 
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         variants = manifest.get("variants", {})
+        if requested == "auto":
+            if "int4" in variants:
+                target_var = "int4"
+            elif "int8" in variants:
+                target_var = "int8"
+            else:
+                target_var = "fp32"
         if target_var in variants:
             files = {}
             missing = []
@@ -240,11 +246,20 @@ class FlorenceOCR:
         )
         self._check_cache_contract()
 
+        # If embed_tokens.npy exists, load directly for O(1) in-memory table slicing
+        # without invoking the ONNX session during decoding.
+        embed_npy = self.model_dir / "embed_tokens.npy"
+        self.embed_table = np.load(str(embed_npy)) if embed_npy.exists() else None
+
         # Precompute the static prompt and start-token embeddings (~33 KB total) and
         # the present->past slot mappings once at startup so neither is recomputed on
         # every request or every token.
-        self._prompt_embeds = self._run("embed_tokens", {"input_ids": self.prompt_ids})[0]
-        self._start_embeds = self._run("embed_tokens", {"input_ids": self.start_ids})[0]
+        if self.embed_table is not None:
+            self._prompt_embeds = self.embed_table[self.prompt_ids]
+            self._start_embeds = self.embed_table[self.start_ids]
+        else:
+            self._prompt_embeds = self._run("embed_tokens", {"input_ids": self.prompt_ids})[0]
+            self._start_embeds = self._run("embed_tokens", {"input_ids": self.start_ids})[0]
         step_input_set = set(self.step_inputs)
         self._prefill_cache_map = [
             (idx, "past_key_values." + name[len("present."):])
@@ -363,7 +378,10 @@ class FlorenceOCR:
         token_ids = np.array([[token]], dtype=np.int64)
         feed: dict[str, np.ndarray] = {"encoder_attention_mask": mask}
         if self.step_embeds_input:
-            feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
+            if self.embed_table is not None:
+                feed[self.step_embeds_input] = self.embed_table[token_ids]
+            else:
+                feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
         if "input_ids" in self.step_inputs:
             feed["input_ids"] = token_ids
         if "encoder_hidden_states" in self.step_inputs:
@@ -446,7 +464,10 @@ class FlorenceOCR:
                 token_ids[0, 0] = tokens[-1]
                 if self.step_embeds_input:
                     t_emb = time.perf_counter()
-                    feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
+                    if self.embed_table is not None:
+                        feed[self.step_embeds_input] = self.embed_table[token_ids]
+                    else:
+                        feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
                     embed_ms += (time.perf_counter() - t_emb) * 1000.0
                 if "input_ids" in self.step_inputs:
                     feed["input_ids"] = token_ids

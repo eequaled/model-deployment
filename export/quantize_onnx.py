@@ -1,8 +1,7 @@
 """Quantize ONNX models for Florence-2 CPU serving.
 
 Builds weight-only 8-bit MatMulNBits for the decoder step graph (the proven accuracy winner),
-plus candidate mixed 4-bit transformer + 8-bit LM head step graph and dynamic INT8 vision encoder.
-encoder_model remains fp32 because dynamic INT8 on BART text encoder destroys OCR text.
+plus mixed 4-bit transformer + 8-bit LM head step graph and QUInt8 dynamic MatMul text encoder.
 decoder_prefill and embed_tokens remain fp32.
 """
 from __future__ import annotations
@@ -15,6 +14,7 @@ import time
 from pathlib import Path
 
 import onnx
+import numpy as np
 import onnxruntime as ort
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
@@ -75,6 +75,35 @@ def quantize_decoder_step_8bit(models_dir: Path) -> dict:
     }
 
 
+def quantize_encoder_model_uint8(models_dir: Path) -> dict:
+    src = models_dir / "encoder_model.onnx"
+    dst = models_dir / "encoder_model.int8.onnx"
+    if not src.exists():
+        raise FileNotFoundError(f"Source model missing: {src}")
+    logger.info("Quantizing encoder_model to QUInt8 MatMul dynamic quantization...")
+    t0 = time.perf_counter()
+    quantize_dynamic(
+        model_input=str(src),
+        model_output=str(dst),
+        op_types_to_quantize=["MatMul"],
+        per_channel=True,
+        weight_type=QuantType.QUInt8,
+    )
+    elapsed = time.perf_counter() - t0
+    counts = count_quantized_nodes(dst)
+    src_sz = src.stat().st_size / 1e6
+    dst_sz = dst.stat().st_size / 1e6
+    logger.info(
+        f"Finished encoder_model uint8 in {elapsed:.1f}s: {src_sz:.1f}MB -> {dst_sz:.1f}MB | {counts}"
+    )
+    return {
+        "file": dst.name,
+        "scheme": "dynamic-quint8-matmul-perchannel",
+        "size_mb": round(dst_sz, 1),
+        "nodes": counts,
+    }
+
+
 def quantize_decoder_step_mixed_4bit(models_dir: Path) -> dict:
     src = models_dir / "decoder_step.onnx"
     dst = models_dir / "decoder_step.int4.onnx"
@@ -130,7 +159,6 @@ def quantize_decoder_step_mixed_4bit(models_dir: Path) -> dict:
 
 
 def write_quant_manifest(models_dir: Path) -> Path:
-    # Notice: encoder_model remains fp32 across all variants because dynamic INT8 on BART encoder collapses text.
     manifest = {
         "onnxruntime": ort.__version__,
         "source": "microsoft/Florence-2-base",
@@ -145,14 +173,14 @@ def write_quant_manifest(models_dir: Path) -> Path:
             "int8": {
                 "vision_encoder": "vision_encoder.onnx",
                 "embed_tokens": "embed_tokens.onnx",
-                "encoder_model": "encoder_model.onnx",
+                "encoder_model": "encoder_model.int8.onnx",
                 "decoder_prefill": "decoder_prefill.onnx",
                 "decoder_step": "decoder_step.int8.onnx",
             },
             "int4": {
                 "vision_encoder": "vision_encoder.onnx",
                 "embed_tokens": "embed_tokens.onnx",
-                "encoder_model": "encoder_model.onnx",
+                "encoder_model": "encoder_model.int8.onnx",
                 "decoder_prefill": "decoder_prefill.onnx",
                 "decoder_step": "decoder_step.int4.onnx",
             },
@@ -161,6 +189,7 @@ def write_quant_manifest(models_dir: Path) -> Path:
             "vision_encoder": "fp32",
             "embed_tokens": "fp32",
             "encoder_model": "fp32",
+            "encoder_model.int8": "dynamic-quint8-matmul-perchannel",
             "decoder_prefill": "fp32",
             "decoder_step.int8": "matmulnbits-qint8-b32-a4",
             "decoder_step.int4": "matmulnbits-mixed-4b8-b32-a4",
@@ -170,6 +199,26 @@ def write_quant_manifest(models_dir: Path) -> Path:
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     logger.info(f"Wrote {manifest_path}")
     return manifest_path
+
+
+def extract_embed_tokens_npy(models_dir: Path) -> Path | None:
+    npy_path = models_dir / "embed_tokens.npy"
+    if npy_path.exists():
+        logger.info(f"{npy_path} already exists")
+        return npy_path
+    onnx_path = models_dir / "embed_tokens.onnx"
+    if not onnx_path.exists():
+        return None
+    logger.info("Extracting embed_tokens.npy from embed_tokens.onnx...")
+    m = onnx.load(str(onnx_path))
+    from onnx import numpy_helper
+    for init in m.graph.initializer:
+        if "weight" in init.name or init.name == "embeddings.weight":
+            arr = numpy_helper.to_array(init)
+            np.save(str(npy_path), arr)
+            logger.info(f"Saved {npy_path} shape={arr.shape} dtype={arr.dtype}")
+            return npy_path
+    return None
 
 
 def main() -> int:
@@ -183,6 +232,8 @@ def main() -> int:
         return 1
 
     t0 = time.perf_counter()
+    extract_embed_tokens_npy(models_dir)
+    quantize_encoder_model_uint8(models_dir)
     quantize_decoder_step_8bit(models_dir)
     quantize_decoder_step_mixed_4bit(models_dir)
     write_quant_manifest(models_dir)
