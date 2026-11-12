@@ -25,5 +25,12 @@ samples/*
 bench/*.json
 results/
 
+# The Triton comparison lab lives outside version control on purpose. Triton
+# Inference Server is explicitly forbidden in the submission (challenge.md:
+# "No prebuilt ML serving servers"), so everything under triton-lab/ is an
+# out-of-tree experiment: same graphs, same CPU envelope, different server.
+# Committed results from it belong in journal.md as quoted numbers, not as files.
+triton-lab/
+
 .env
 .DS_Store

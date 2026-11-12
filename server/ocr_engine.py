@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import time
 from pathlib import Path
 
@@ -122,6 +123,32 @@ POSTPROCESS_MODES = ("pure_text", "baseline")
 PRECISION_MODES = ("auto", "fp32", "int8", "int4")
 
 
+def has_avx_vnni() -> bool:
+    """Detect if the CPU hardware supports Vector Neural Network Instructions (VNNI).
+    Works in Linux/Docker (/proc/cpuinfo) and bare-metal Windows."""
+    # 1. Linux & Docker on Windows (WSL2 / Docker Desktop)
+    try:
+        cpuinfo = Path("/proc/cpuinfo")
+        if cpuinfo.exists():
+            for line in cpuinfo.read_text(encoding="utf-8").splitlines():
+                if line.startswith("flags"):
+                    flags = set(line.split()[2:])
+                    return bool({"avx_vnni", "avx512_vnni"} & flags)
+    except Exception:
+        pass
+
+    # 2. Native Windows fallback
+    if platform.system() == "Windows":
+        try:
+            proc = platform.processor().lower()
+            if any(term in proc for term in ["12th gen", "13th gen", "14th gen", "ultra", "xeon", "genoa"]):
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def load_precision_files(models_dir: Path, requested: str = "auto",
                          allow_fallback: bool = False) -> dict[str, Path]:
     """Resolve the five ONNX model paths from quant.json or directory defaults."""
@@ -152,6 +179,12 @@ def load_precision_files(models_dir: Path, requested: str = "auto",
                 if not p.exists():
                     missing.append(fname)
                 files[role] = p
+            # Hardware-adaptive precision: if host CPU has VNNI, upgrade encoder_model to int8
+            if role == "encoder_model" and has_avx_vnni():
+                int8_enc = models_dir / "encoder_model.int8.onnx"
+                if int8_enc.exists():
+                    files["encoder_model"] = int8_enc
+                    logger.info("Host CPU supports AVX-VNNI: upgrading encoder_model to int8.")
             if missing:
                 if allow_fallback and target_var != "fp32":
                     logger.warning(
