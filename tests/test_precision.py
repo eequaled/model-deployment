@@ -112,3 +112,48 @@ def test_load_precision_fallback_to_fp32(tmp_path):
     # int8 missing a file with allow_fallback=True returns fp32 files
     files = load_precision_files(tmp_path, requested="int8", allow_fallback=True)
     assert files["vision_encoder"] == tmp_path / "vis.onnx"
+
+
+def test_avx_vnni_upgrade_is_auto_only(tmp_path, monkeypatch):
+    manifest = {
+        "variants": {
+            "fp32": {
+                "vision_encoder": "vis.onnx",
+                "embed_tokens": "emb.onnx",
+                "encoder_model": "enc.onnx",
+                "decoder_prefill": "pref.onnx",
+                "decoder_step": "step.onnx",
+            },
+            "int8": {
+                "vision_encoder": "vis.onnx",
+                "embed_tokens": "emb.onnx",
+                "encoder_model": "enc.onnx",
+                "decoder_prefill": "pref.onnx",
+                "decoder_step": "step.int8.onnx",
+            },
+            "int4": {
+                "vision_encoder": "vis.onnx",
+                "embed_tokens": "emb.onnx",
+                "encoder_model": "enc.onnx",
+                "decoder_prefill": "pref.onnx",
+                "decoder_step": "step.int4.onnx",
+            },
+        }
+    }
+    (tmp_path / "quant.json").write_text(json.dumps(manifest))
+    for fname in ("vis.onnx", "emb.onnx", "enc.onnx", "pref.onnx", "step.onnx",
+                  "step.int8.onnx", "step.int4.onnx", "encoder_model.int8.onnx"):
+        (tmp_path / fname).touch()
+
+    monkeypatch.setattr("server.ocr_engine.has_avx_vnni", lambda: True)
+
+    # `auto` may use the VNNI encoder; explicit variants must not be rewritten.
+    files_auto = load_precision_files(tmp_path, requested="auto")
+    assert files_auto["encoder_model"] == tmp_path / "encoder_model.int8.onnx"
+    assert load_precision_files(tmp_path, requested="fp32")["encoder_model"] == tmp_path / "enc.onnx"
+    assert load_precision_files(tmp_path, requested="int8")["encoder_model"] == tmp_path / "enc.onnx"
+
+    # Without the optional VNNI encoder, `auto` keeps the manifest's FP32 encoder.
+    (tmp_path / "encoder_model.int8.onnx").unlink()
+    files_auto_no_int8 = load_precision_files(tmp_path, requested="auto")
+    assert files_auto_no_int8["encoder_model"] == tmp_path / "enc.onnx"

@@ -325,3 +325,58 @@ bare-metal Windows; when it returns True the engine upgrades `encoder_model` to
   that is strictly faster in hardware on that CPU; it never downgrades fidelity on a
   CPU that cannot accelerate it. Explicit `PRECISION=fp32|int8|int4` overrides remain
   available, and the original fp32 graphs are always shipped.
+
+## 13. Batching and workers probe (2026-11-12)
+
+After every other optimization landed, concurrent requests and a second inference
+worker were measured instead of assumed. The five graphs have no batch axis, so
+in-graph tensor batching was not on the table; the probe measures whether a second
+worker can use CPU capacity that one request leaves idle.
+
+**1 worker, `OCR_WORKERS=1`, `ORT_THREADS=4`, `QUEUE_LIMIT=1`** (the shipped default),
+open-loop at `--cpus=4`, real FUNSD images:
+
+| Target RPS | Sustained RPS | Success | p50 | p95 |
+|---:|---:|---:|---:|---:|
+| 0.20 | 0.20 | 100% | 3027 ms | 3317 ms |
+| 0.25 | 0.25 | 100% | 2930 ms | 3367 ms |
+| 0.30 | 0.30 | 100% | 2857 ms | 2981 ms |
+| 0.35 | 0.35 | 100% | 3137 ms | 3341 ms |
+
+The 2.11 GB reading taken immediately after startup was not a peak. A re-check after
+the same 0.35 RPS probe (one 503 from queue overflow, so its latency is not used)
+measured `VmHWM` 2.50 GiB (2,622,284 kB); the earlier c10 stress test peaked at
+2.39 GiB (2,509,960 kB), consistent with that. V1 measured 0.15 RPS; the optimized
+engine sustains 0.35 at 100% success.
+
+**2 workers, `OCR_WORKERS=2`, `ORT_THREADS=2` each, `QUEUE_LIMIT=2`**, same images:
+
+| Target RPS | Sustained RPS | Success | p50 | p95 |
+|---:|---:|---:|---:|---:|
+| 0.20 | 0.20 | 100% | 4197 ms | 4437 ms |
+| 0.25 | 0.25 | 100% | 4601 ms | 4659 ms |
+| 0.30 | 0.30 | 100% | 5182 ms | 5422 ms |
+| 0.35 | 0.35 | 100% | 5566 ms | 5774 ms |
+
+Peak `VmHWM` **2.90 GiB** (3,041,400 kB; 3.04 GB decimal). At the same 0.35 RPS the
+second worker is **77% worse on p50** (5.57 s vs 3.14 s) and **73% worse on p95**
+(5.77 s vs 3.34 s); the penalty grows with load, reaching +81% p50 at 0.30 RPS. The
+old +84% compared the 2-worker 0.35 RPS p50 with the 1-worker 0.20 RPS p50, which is
+not a same-load comparison. Peak memory rises by about **+0.40 GiB** (2.90 vs
+2.50 GiB, +16%) versus the re-check, or +0.51 GiB (+21%) versus the earlier stress
+peak; the old +44% compared a pre-load reading with a post-load peak. The gate was:
+adopt only if RPS rises at least 15% with p95 under 30 s and peak under 3.8 GiB. RPS
+rose 0%.
+
+**Why.** One image on 4 CPUs already saturates every core. Splitting the same 4 CPUs
+across 2 images halves per-request compute, so each request takes twice as long, and
+throughput does not rise. The shared engine means weights are not duplicated (one copy,
+unlike multi-process serving), but the CPU is the binding constraint, not memory.
+
+**Concurrency verdict: rejected, measured.** The five graphs have no batch axis, so
+true tensor batching would need a re-export; what was measured here is concurrent
+requests through the same engine (two worker threads). `OCR_WORKERS=1`,
+`QUEUE_LIMIT=1`, batch 1 remain the shipped defaults. The same conclusion nisbenz
+measured on an i5-13400F (batch 1 vs 2: same RPS, worse p50, +0.76 GB) holds here. A
+second worker only helps if the official evaluation CPU allocation is larger than 4
+CPUs, which is TBA; even then the latency cost is real and the win is not.

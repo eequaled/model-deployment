@@ -174,17 +174,21 @@ def load_precision_files(models_dir: Path, requested: str = "auto",
         if target_var in variants:
             files = {}
             missing = []
+            # Hardware adaptation is an `auto` policy, not an override: an explicit
+            # PRECISION=fp32|int8|int4 must load exactly the variant it names.
+            vnni_upgrade = requested == "auto" and has_avx_vnni()
             for role, fname in variants[target_var].items():
                 p = models_dir / fname
+                if vnni_upgrade and role == "encoder_model":
+                    int8_enc = models_dir / "encoder_model.int8.onnx"
+                    if int8_enc.exists():
+                        p = int8_enc
+                        logger.info(
+                            "Host CPU supports AVX-VNNI: using encoder_model.int8.onnx."
+                        )
                 if not p.exists():
-                    missing.append(fname)
+                    missing.append(p.name)
                 files[role] = p
-            # Hardware-adaptive precision: if host CPU has VNNI, upgrade encoder_model to int8
-            if role == "encoder_model" and has_avx_vnni():
-                int8_enc = models_dir / "encoder_model.int8.onnx"
-                if int8_enc.exists():
-                    files["encoder_model"] = int8_enc
-                    logger.info("Host CPU supports AVX-VNNI: upgrading encoder_model to int8.")
             if missing:
                 if allow_fallback and target_var != "fp32":
                     logger.warning(
