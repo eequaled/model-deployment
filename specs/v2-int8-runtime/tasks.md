@@ -20,27 +20,27 @@
     - Wrote `bench/postprocess_eval.py`
     - _Requirements: 1.3, 1.4_
 
-- [ ] 3. Build the quantized graphs
+- [x] 3. Build the quantized graphs
   - [x] 3.0 Resolve the ONNX Runtime version for weight-only quantization
     - Resolved: **1.31.1** installed and verified against the existing fp32 graphs
       (same text, 7.0 s load). 1.20.1 shipped only 4-bit; 1.22 added 8-bit
     - The exporter and runtime both pin 1.31.1; the exporter also installs `onnx_ir`
       and `ml_dtypes`
     - _Requirements: 5.2, 7.1, 7.3_
-  - [ ] 3.1 Write `export/quantize_onnx.py`: dynamic int8 on `MatMul` only for
+  - [x] 3.1 Write `export/quantize_onnx.py`: dynamic int8 on `MatMul` only for
     `vision_encoder` and `encoder_model`, `embed_tokens` copied as fp32
     - Fail if a graph converts zero nodes
     - _Requirements: 5.1, 5.3_
-  - [ ] 3.2 Extend the script with `MatMulNBitsQuantizer(bits=8, block_size=32,
+  - [x] 3.2 Extend the script with `MatMulNBitsQuantizer(bits=8, block_size=32,
     is_symmetric=True, accuracy_level=4)` for `decoder_step`, written as
     `decoder_step.int8.onnx`; copy `decoder_prefill` as fp32
     - Print source and target size per graph
     - _Requirements: 5.2_
-  - [ ] 3.3 Emit `quant.json` with the three variants, file names, schemes, bits,
+  - [x] 3.3 Emit `quant.json` with the three variants, file names, schemes, bits,
     block size, and ORT version; add a test that every listed file exists and matches
     the on-disk size
     - _Requirements: 5.3, 7.3_
-  - [ ] 3.4 Build the mixed 4-bit step variant: pass one 4-bit excluding
+  - [x] 3.4 Build the mixed 4-bit step variant: pass one 4-bit excluding
     `/language_model/lm_head/MatMul`, pass two 8-bit on the remaining MatMul; write
     `decoder_step.int4.onnx`
     - Assert 48 four-bit `MatMulNBits` nodes and one eight-bit LM-head node
