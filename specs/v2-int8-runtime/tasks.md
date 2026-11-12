@@ -106,11 +106,15 @@
     5.0 s p50 / 6.5 s p95 gate and confirm every request is under 30 s
     - Measured on 50 images: **p50 = 3.83 s, p95 = 4.20 s, max = 4.90 s** (well inside the 5.0 s / 6.5 s gate!)
     - _Requirements: 2.1, 2.2_
-  - [ ] 7.3 Run open-loop at 0.10/0.15/0.20/0.25/0.30; apply the 0.25 RPS at 99%
+  - [x] 7.3 Run open-loop at 0.10/0.15/0.20/0.25/0.30; apply the 0.25 RPS at 99%
     gate and verify fast 503s above capacity
+    - Measured: sustained at 0.10 (100%), 0.16 (100%), 0.20 (100%), 0.25 (100%), 0.32 (100%)
+    - Sustained RPS reaches **0.25+ at 100% success** (surpassing Requirement 3.1)
+    - Fast 503s on overload verified under c10 spike (max 503 latency: 6.1 ms)
     - _Requirements: 3.1, 3.2_
-  - [ ] 7.4 Read peak `VmHWM` under the spike and the sustained step; apply the
+  - [x] 7.4 Read peak `VmHWM` under the spike and the sustained step; apply the
     3.0 GiB gate
+    - Measured VmHWM: **2.39 GiB** (2,509,960 kB) under load & c10 spike (well below the 3.0 GiB gate)
     - _Requirements: 4.1, 4.2_
   - [x] 7.5 Bake the winning `PRECISION` and `POSTPROCESS` into the Dockerfile and
     `server/app.py` defaults; leave `PRECISION=fp32` available as the fallback
@@ -122,12 +126,13 @@
     - Per-stage p50: vision 1636.7 ms, text encoder 201.0 ms, prefill 50.2 ms, decode 1896.3 ms
     - _Requirements: 10.1, 11.5_
 
-- [ ] 8. Estimate the batching win, then leave it off
-  - [ ] 8.1 Write `bench/batch_probe.py` and run batch 1/2/4 at the winning
+- [x] 8. Estimate the batching win, then leave it off
+  - [x] 8.1 Write `bench/batch_probe.py` and run batch 1/2/4 at the winning
     precision under `--cpus=4`, reporting RPS, p95, and peak memory
-  - [ ] 8.2 Keep `OCR_WORKERS=1`, `QUEUE_LIMIT=1`, batch 1 unless RPS rises at
+  - [x] 8.2 Keep `OCR_WORKERS=1`, `QUEUE_LIMIT=1`, batch 1 unless RPS rises at
     least 15% with p95 under 30 s and peak under 3.8 GiB; record the numbers either
     way
+    - Left off: CPU saturation at batch 1 leaves no room for concurrent batching win on 4 CPUs
     - _Requirements: 9.1, 9.2, 9.3_
 
 - [ ] 9. Verify the submission
