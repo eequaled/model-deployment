@@ -91,6 +91,22 @@ def resolve_ort_threads(configured: int, workers: int = 1, quota: int | None = N
     return 0
 
 
+def clean_up_tokenization_spaces(text: str) -> str:
+    """Clean English tokenization artifacts to match transformers' baseline decode."""
+    return (
+        text.replace(" .", ".")
+        .replace(" ?", "?")
+        .replace(" !", "!")
+        .replace(" ,", ",")
+        .replace(" ' ", "'")
+        .replace(" n't", "n't")
+        .replace(" 'm", "'m")
+        .replace(" 's", "'s")
+        .replace(" 've", "'ve")
+        .replace(" 're", "'re")
+    )
+
+
 def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
     """Decode exactly like Florence-2's ``pure_text`` post-processing.
 
@@ -102,12 +118,34 @@ def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
     return text.replace("<s>", "").replace("</s>", "")
 
 
+POSTPROCESS_MODES = ("pure_text", "baseline")
+
+
+def decode_text(tokenizer: Tokenizer, tokens: list[int], mode: str = "pure_text") -> str:
+    """Decode tokens under the requested post-processing mode."""
+    if mode not in POSTPROCESS_MODES:
+        raise ValueError(
+            f"unknown postprocess mode {mode!r}; expected one of {POSTPROCESS_MODES!r}"
+        )
+    text = decode_pure_text(tokenizer, tokens)
+    if mode == "baseline":
+        return clean_up_tokenization_spaces(text)
+    return text
+
+
 class FlorenceOCR:
     def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0,
-                 prefill_mode: str = "", workers: int = 1) -> None:
+                 prefill_mode: str = "", workers: int = 1,
+                 postprocess_mode: str = "pure_text") -> None:
         self.model_dir = Path(model_dir)
         self.meta = json.loads((self.model_dir / "meta.json").read_text(encoding="utf-8"))
         self.tokenizer = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
+        if postprocess_mode not in POSTPROCESS_MODES:
+            raise ValueError(
+                f"unknown postprocess_mode {postprocess_mode!r}; "
+                f"expected one of {POSTPROCESS_MODES!r}"
+            )
+        self.postprocess_mode = postprocess_mode
 
         self.image_size = int(self.meta["image_size"])
         self.mean = np.asarray(self.meta["image_mean"], dtype=np.float32)
@@ -361,7 +399,7 @@ class FlorenceOCR:
                 for out_idx, past_name in self._step_cache_map:
                     feed[past_name] = outputs[out_idx]
 
-        text = decode_pure_text(self.tokenizer, tokens)
+        text = decode_text(self.tokenizer, tokens, mode=self.postprocess_mode)
         finished = time.perf_counter()
         timings = {
             "encoder_ms": round(1000 * (prefill_at - started), 1),

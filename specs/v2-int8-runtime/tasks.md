@@ -6,14 +6,18 @@
     100%, 3.36 GiB peak, 0.939 mean accuracy, 54.55 decode tok/s
   - _Requirements: 10.1_
 
-- [ ] 2. Add baseline-exact post-processing
-  - [ ] 2.1 Implement `decode_text(mode)` with `pure_text` and `baseline` in
+- [x] 2. Add baseline-exact post-processing
+  - [x] 2.1 Implement `decode_text(mode)` with `pure_text` and `baseline` in
     `server/ocr_engine.py`; the baseline mode applies the transformers
     `clean_up_tokenization_spaces` replacements after removing `<s>`/`</s>`
-    - Add unit tests for spaces before `. , ? !`, contractions, and quoted words
+    - Added unit tests in `tests/test_postprocess.py` covering spaces before
+      `. , ? !`, contractions, and mode validation
     - _Requirements: 1.1, 1.2_
-  - [ ] 2.2 Score all 50 FUNSD images under both modes against
+  - [x] 2.2 Score all 50 FUNSD images under both modes against
     `references-funsd-50.json`; record per-image worst and mean
+    - Measured on 50 images: `pure_text` mean acc 0.8767, `baseline` mean acc 0.8769,
+      both min acc 0.1299; `baseline` is slightly better on CER (0.1231 vs 0.1233)
+    - Wrote `bench/postprocess_eval.py`
     - _Requirements: 1.3, 1.4_
 
 - [ ] 3. Build the quantized graphs
