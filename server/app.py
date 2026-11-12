@@ -42,6 +42,8 @@ MAX_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000)))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "0"))
 PREFILL_MODE = os.getenv("PREFILL_MODE", "")
 POSTPROCESS = os.getenv("POSTPROCESS", "pure_text")
+PRECISION = os.getenv("PRECISION", "auto")
+ALLOW_FP32_FALLBACK = os.getenv("ALLOW_FP32_FALLBACK", "0") != "0"
 WARMUP = os.getenv("WARMUP", "1") != "0"
 
 
@@ -58,7 +60,9 @@ def build_engine() -> FlorenceOCR:
     """Constructed once at startup. Tests patch this to avoid needing weights."""
     return FlorenceOCR(MODEL_DIR, threads=THREADS, max_new_tokens=MAX_NEW_TOKENS,
                        prefill_mode=PREFILL_MODE, workers=WORKERS,
-                       postprocess_mode=POSTPROCESS)
+                       postprocess_mode=POSTPROCESS,
+                       precision=PRECISION,
+                       allow_fp32_fallback=ALLOW_FP32_FALLBACK)
 
 
 @asynccontextmanager

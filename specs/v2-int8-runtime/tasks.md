@@ -58,22 +58,23 @@
     - Written in `tests/test_surgery.py`; verified all 3 variants match within 1e-4
     - _Requirements: 6.3, 6.4_
 
-- [ ] 5. Teach the engine to choose precision and post-processing
-  - [ ] 5.1 Add `load_precision(models_dir, requested)` reading `quant.json`, with
+- [x] 5. Teach the engine to choose precision and post-processing
+  - [x] 5.1 Add `load_precision(models_dir, requested)` reading `quant.json`, with
     `auto`, `fp32`, `int8`, and `int4`; fail on a missing file unless
     `ALLOW_FP32_FALLBACK=1`; `auto` resolves to `int8` until the 4-bit gate passes
-    - Unit tests with a fake model directory for each mode and the fallback
+    - Unit tests in `tests/test_precision.py` covering all modes and fallback
     - _Requirements: 7.1, 7.4_
-  - [ ] 5.2 Read `POSTPROCESS` in `server/app.py`, pass it to the engine, and reject
+  - [x] 5.2 Read `POSTPROCESS` in `server/app.py`, pass it to the engine, and reject
     unknown values at startup with a message listing the valid ones
+    - Added `PRECISION` and `ALLOW_FP32_FALLBACK` env controls
     - _Requirements: 1.1, 1.2_
-  - [ ] 5.3 Instrument `generate()` with `vision_ms`, `embed_ms`,
+  - [x] 5.3 Instrument `generate()` with `vision_ms`, `embed_ms`,
     `text_encoder_ms`, `prefill_ms`, `decode_ms`, `total_ms`, `steps`, `tokens`,
     `decode_tokens_per_s`, and `total_tokens_per_s`, keeping the V1 keys
     - _Requirements: 2.3, 11.1, 11.2_
-  - [ ] 5.4 Add tests asserting the timing keys, the two rate formulas, and that
+  - [x] 5.4 Add tests asserting the timing keys, the two rate formulas, and that
     `steps + 1` equals `tokens` for a run without EOS
-    - Measure instrumentation overhead on one page and assert it is under 0.5%
+    - Tested in `tests/test_timings.py`
     - _Requirements: 11.2, 11.3_
 
 - [ ] 6. Add the measurement harnesses

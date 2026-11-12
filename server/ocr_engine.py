@@ -119,6 +119,56 @@ def decode_pure_text(tokenizer: Tokenizer, tokens: list[int]) -> str:
 
 
 POSTPROCESS_MODES = ("pure_text", "baseline")
+PRECISION_MODES = ("auto", "fp32", "int8", "int4")
+
+
+def load_precision_files(models_dir: Path, requested: str = "auto",
+                         allow_fallback: bool = False) -> dict[str, Path]:
+    """Resolve the five ONNX model paths from quant.json or directory defaults."""
+    if requested not in PRECISION_MODES:
+        raise ValueError(
+            f"unknown precision {requested!r}; expected one of {PRECISION_MODES!r}"
+        )
+    manifest_path = models_dir / "quant.json"
+    target_var = requested
+    if requested == "auto":
+        # Default auto resolves to int8 until 4-bit is proven across the full gate
+        target_var = "int8" if manifest_path.exists() else "fp32"
+
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        variants = manifest.get("variants", {})
+        if target_var in variants:
+            files = {}
+            missing = []
+            for role, fname in variants[target_var].items():
+                p = models_dir / fname
+                if not p.exists():
+                    missing.append(fname)
+                files[role] = p
+            if missing:
+                if allow_fallback and target_var != "fp32":
+                    logger.warning(
+                        "precision %s missing files %s; falling back to fp32",
+                        target_var, missing
+                    )
+                    return load_precision_files(models_dir, requested="fp32", allow_fallback=False)
+                raise FileNotFoundError(
+                    f"precision {target_var} missing required model files in {models_dir}: {missing}"
+                )
+            return files
+
+    # Fallback to standard filenames
+    files = {}
+    missing = []
+    for role in ("vision_encoder", "embed_tokens", "encoder_model", "decoder_prefill", "decoder_step"):
+        p = models_dir / f"{role}.onnx"
+        if not p.exists():
+            missing.append(p.name)
+        files[role] = p
+    if missing:
+        raise FileNotFoundError(f"Missing default model files in {models_dir}: {missing}")
+    return files
 
 
 def decode_text(tokenizer: Tokenizer, tokens: list[int], mode: str = "pure_text") -> str:
@@ -136,7 +186,9 @@ def decode_text(tokenizer: Tokenizer, tokens: list[int], mode: str = "pure_text"
 class FlorenceOCR:
     def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0,
                  prefill_mode: str = "", workers: int = 1,
-                 postprocess_mode: str = "pure_text") -> None:
+                 postprocess_mode: str = "pure_text",
+                 precision: str = "auto",
+                 allow_fp32_fallback: bool = False) -> None:
         self.model_dir = Path(model_dir)
         self.meta = json.loads((self.model_dir / "meta.json").read_text(encoding="utf-8"))
         self.tokenizer = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
@@ -146,6 +198,11 @@ class FlorenceOCR:
                 f"expected one of {POSTPROCESS_MODES!r}"
             )
         self.postprocess_mode = postprocess_mode
+        self.precision = precision
+        self.allow_fp32_fallback = allow_fp32_fallback
+        self.model_paths = load_precision_files(
+            self.model_dir, requested=precision, allow_fallback=allow_fp32_fallback
+        )
 
         self.image_size = int(self.meta["image_size"])
         self.mean = np.asarray(self.meta["image_mean"], dtype=np.float32)
@@ -226,19 +283,12 @@ class FlorenceOCR:
             options.add_session_config_entry("session.intra_op.allow_spinning", spinning)
         sessions = {}
         started = time.perf_counter()
-        for name in (
-            "vision_encoder",
-            "embed_tokens",
-            "encoder_model",
-            "decoder_prefill",
-            "decoder_step",
-        ):
-            path = self.model_dir / f"{name}.onnx"
+        for name, path in self.model_paths.items():
             sessions[name] = ort.InferenceSession(
                 str(path), sess_options=options, providers=["CPUExecutionProvider"]
             )
-        logger.info("loaded 5 sessions in %.1fs (intra_op_threads=%s)",
-                    time.perf_counter() - started, self.threads or "auto")
+        logger.info("loaded 5 sessions (%s) in %.1fs (intra_op_threads=%s)",
+                    self.precision, time.perf_counter() - started, self.threads or "auto")
         return sessions
 
     def _check_cache_contract(self) -> None:
@@ -344,16 +394,16 @@ class FlorenceOCR:
         return elapsed_ms
 
     def generate(self, image, max_tokens: int = 0) -> tuple[str, dict[str, float]]:
-        started = time.perf_counter()
+        t_start = time.perf_counter()
         pixel_values = self.preprocess(image)
 
+        t_vis_0 = time.perf_counter()
         image_features = self._run("vision_encoder", {"pixel_values": pixel_values})[0]
+        vision_ms = (time.perf_counter() - t_vis_0) * 1000.0
+
         prompt_embeds = self._prompt_embeds
         merged = np.concatenate([image_features, prompt_embeds], axis=1).astype(np.float32)
         encoder_length = merged.shape[1]
-        # The step graph broadcasts this mask against the cached cross-attention
-        # tensors. Check here so a mismatch is one clear error rather than a
-        # broadcast failure a hundred tokens into decoding.
         expected = int(self.meta.get("encoder_length") or 0)
         if expected and encoder_length != expected:
             raise RuntimeError(
@@ -361,11 +411,12 @@ class FlorenceOCR:
                 "check the prompt ids and the vision graph"
             )
         mask = np.ones((1, encoder_length), dtype=np.float32)
-        encoder_states = self._run("encoder_model", {"inputs_embeds": merged, "attention_mask": mask})[0]
-        prefill_at = time.perf_counter()
 
-        # The decoder prefix: see the module docstring. Only the last row of logits is
-        # kept; the positions exist so that row has the context the reference gave it.
+        t_enc_0 = time.perf_counter()
+        encoder_states = self._run("encoder_model", {"inputs_embeds": merged, "attention_mask": mask})[0]
+        text_encoder_ms = (time.perf_counter() - t_enc_0) * 1000.0
+
+        t_pref_0 = time.perf_counter()
         outputs = self._run(
             "decoder_prefill",
             {
@@ -374,13 +425,16 @@ class FlorenceOCR:
                 self.prefill_embeds_input: self.prefill_embeds(prompt_embeds),
             },
         )
-        tokens = [int(outputs[0][0, -1].argmax())]
+        first_token = int(outputs[0][0, -1].argmax())
+        tokens = [first_token]
+        prefill_ms = (time.perf_counter() - t_pref_0) * 1000.0
+
+        t_dec_0 = time.perf_counter()
+        embed_ms = 0.0
+        step_calls = 0
         cap = max_tokens or self.max_new_tokens
 
         if tokens[-1] != self.eos_id and len(tokens) < cap:
-            # Build the step feed once: the 12 cross-attention tensors never change
-            # mid-request, so each step only swaps in the 12 updated self-attention
-            # tensors and the new token embedding.
             feed: dict[str, np.ndarray] = {"encoder_attention_mask": mask}
             if "encoder_hidden_states" in self.step_inputs:
                 feed["encoder_hidden_states"] = encoder_states
@@ -391,19 +445,36 @@ class FlorenceOCR:
             while tokens[-1] != self.eos_id and len(tokens) < cap:
                 token_ids[0, 0] = tokens[-1]
                 if self.step_embeds_input:
+                    t_emb = time.perf_counter()
                     feed[self.step_embeds_input] = self._run("embed_tokens", {"input_ids": token_ids})[0]
+                    embed_ms += (time.perf_counter() - t_emb) * 1000.0
                 if "input_ids" in self.step_inputs:
                     feed["input_ids"] = token_ids
                 outputs = self._run("decoder_step", feed)
+                step_calls += 1
                 tokens.append(int(outputs[0][0, -1].argmax()))
                 for out_idx, past_name in self._step_cache_map:
                     feed[past_name] = outputs[out_idx]
 
+        decode_ms = (time.perf_counter() - t_dec_0) * 1000.0
         text = decode_text(self.tokenizer, tokens, mode=self.postprocess_mode)
-        finished = time.perf_counter()
+        total_ms = (time.perf_counter() - t_start) * 1000.0
+
+        num_tokens = len(tokens)
+        decode_tok_s = round(step_calls * 1000.0 / decode_ms, 2) if decode_ms > 0 else 0.0
+        total_tok_s = round(num_tokens * 1000.0 / total_ms, 2) if total_ms > 0 else 0.0
+
         timings = {
-            "encoder_ms": round(1000 * (prefill_at - started), 1),
-            "decode_ms": round(1000 * (finished - prefill_at), 1),
-            "total_ms": round(1000 * (finished - started), 1),
+            "encoder_ms": round(vision_ms + text_encoder_ms, 1),
+            "decode_ms": round(decode_ms, 1),
+            "total_ms": round(total_ms, 1),
+            "vision_ms": round(vision_ms, 1),
+            "text_encoder_ms": round(text_encoder_ms, 1),
+            "prefill_ms": round(prefill_ms, 1),
+            "embed_ms": round(embed_ms, 1),
+            "steps": step_calls,
+            "tokens": num_tokens,
+            "decode_tokens_per_s": decode_tok_s,
+            "total_tokens_per_s": total_tok_s,
         }
         return text, timings
