@@ -29,7 +29,11 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1" 
 
 WORKDIR /build
 COPY export/export_onnx.py export/export_onnx.py
-RUN python export/export_onnx.py --out /models
+COPY export/quantize_onnx.py export/quantize_onnx.py
+COPY export/optimize_decoder.py export/optimize_decoder.py
+RUN python export/export_onnx.py --out /models \
+    && python export/quantize_onnx.py --models /models \
+    && python export/optimize_decoder.py --models /models
 
 FROM python:3.12-slim AS runtime
 
@@ -41,6 +45,8 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     ORT_ALLOW_SPINNING=0 \
     MODEL_DIR=/models \
+    PRECISION=auto \
+    POSTPROCESS=baseline \
     PORT=8000
 
 RUN pip install "onnxruntime==1.31.1" "tokenizers==0.20.3" "fastapi==0.115.6" \

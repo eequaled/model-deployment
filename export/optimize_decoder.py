@@ -24,18 +24,21 @@ def optimize_prefill(model_path: Path, out_path: Path | None = None) -> None:
         out_path = model_path
     m = onnx.load(str(model_path))
     modified_count = 0
+    already_optimized = 0
     for node in m.graph.node:
         if node.op_type == "Transpose" and any("encoder.key" in o for o in node.output):
-            # Original perm is [0, 2, 1, 3] from Reshape [batch, seq, heads, dim]
-            # to [batch, heads, seq, dim].
-            # Step then did Transpose_1 with [0, 1, 3, 2] to get [batch, heads, dim, seq].
-            # Direct combined perm is [0, 2, 3, 1].
             for a in node.attribute:
                 if a.name == "perm":
-                    assert list(a.ints) == [0, 2, 1, 3], f"Unexpected perm {list(a.ints)}"
-                    a.ints[:] = [0, 2, 3, 1]
-                    modified_count += 1
+                    if list(a.ints) == [0, 2, 3, 1]:
+                        already_optimized += 1
+                    else:
+                        assert list(a.ints) == [0, 2, 1, 3], f"Unexpected perm {list(a.ints)}"
+                        a.ints[:] = [0, 2, 3, 1]
+                        modified_count += 1
                     break
+    if already_optimized == 6:
+        logger.info(f"Prefill already optimized -> {out_path}")
+        return
     if modified_count != 6:
         raise RuntimeError(
             f"Expected 6 cross-key Transpose nodes in prefill, modified {modified_count}"
@@ -46,7 +49,6 @@ def optimize_prefill(model_path: Path, out_path: Path | None = None) -> None:
         if "encoder.key" in out.name:
             dims = out.type.tensor_type.shape.dim
             if len(dims) == 4:
-                # swap dims[2] and dims[3]
                 d2_val, d2_param = dims[2].dim_value, dims[2].dim_param
                 d3_val, d3_param = dims[3].dim_value, dims[3].dim_param
                 if d2_val:
@@ -72,7 +74,6 @@ def optimize_step(model_path: Path, out_path: Path | None = None) -> None:
         out_path = model_path
     m = onnx.load(str(model_path))
 
-    # Find the 6 Transpose nodes: input past_key_values.{i}.encoder.key
     nodes_to_remove = set()
     replacement_map = {}
 
@@ -96,6 +97,10 @@ def optimize_step(model_path: Path, out_path: Path | None = None) -> None:
             out_name = node.output[0]
             nodes_to_remove.add(node.name)
             replacement_map[out_name] = in_name
+
+    if len(nodes_to_remove) == 0:
+        logger.info(f"Step already optimized -> {out_path}")
+        return
 
     if len(nodes_to_remove) != 6:
         raise RuntimeError(

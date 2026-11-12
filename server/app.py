@@ -41,7 +41,7 @@ MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000)))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "0"))
 PREFILL_MODE = os.getenv("PREFILL_MODE", "")
-POSTPROCESS = os.getenv("POSTPROCESS", "pure_text")
+POSTPROCESS = os.getenv("POSTPROCESS", "baseline")
 PRECISION = os.getenv("PRECISION", "auto")
 ALLOW_FP32_FALLBACK = os.getenv("ALLOW_FP32_FALLBACK", "0") != "0"
 WARMUP = os.getenv("WARMUP", "1") != "0"

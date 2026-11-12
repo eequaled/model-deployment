@@ -18,7 +18,7 @@ from tests.tinymodel import IMAGE_TOKENS, LAYERS, PROMPT_IDS
 def test_generate_returns_text_within_cap(engine):
     text, timings = engine.generate(Image.new("RGB", (300, 200), (255, 255, 255)))
     assert isinstance(text, str) and text
-    assert set(timings) == {"encoder_ms", "decode_ms", "total_ms"}
+    assert {"encoder_ms", "decode_ms", "total_ms"}.issubset(set(timings))
     assert timings["total_ms"] >= 0
 
 

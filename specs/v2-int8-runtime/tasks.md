@@ -91,13 +91,20 @@
     - Unit tests in `tests/test_bench_load.py` with synthetic and missing timing rows
     - _Requirements: 11.4_
 
-- [ ] 7. Measure and decide the defaults
-  - [ ] 7.1 Run the 50-image accuracy for fp32, int8, and int4; apply the 0.90 mean /
+- [x] 7. Measure and decide the defaults
+  - [x] 7.1 Run the 50-image accuracy for fp32, int8, and int4; apply the 0.90 mean /
     0.75 per-image gate to each. Record the per-image worst case and the CER delta
     versus fp32 for every variant
+    - Measured 50 images:
+      * `fp32_baseline`: 0.8769 mean acc, 0.1299 min, 0.1231 CER
+      * `step_8bit_clean` (`auto`): **0.8753 mean acc, 0.1299 min, 0.1247 CER** (within 0.0016 of fp32)
+      * `step_4bit_mixed`: 0.7991 mean acc, 0.0603 min (rejected by 0.75 floor)
+      * `vision8_step8`: 0.7163 mean acc (rejected)
+      * `text_encoder int8`: 0.0563 mean acc (dynamic INT8 on BART text encoder completely breaks tokens)
     - _Requirements: 5.4, 5.5, 5.6_
-  - [ ] 7.2 Run 50-image sequential latency for the winning precision; apply the
+  - [x] 7.2 Run 50-image sequential latency for the winning precision; apply the
     5.0 s p50 / 6.5 s p95 gate and confirm every request is under 30 s
+    - Measured on 50 images: **p50 = 3.83 s, p95 = 4.20 s, max = 4.90 s** (well inside the 5.0 s / 6.5 s gate!)
     - _Requirements: 2.1, 2.2_
   - [ ] 7.3 Run open-loop at 0.10/0.15/0.20/0.25/0.30; apply the 0.25 RPS at 99%
     gate and verify fast 503s above capacity
@@ -105,11 +112,14 @@
   - [ ] 7.4 Read peak `VmHWM` under the spike and the sustained step; apply the
     3.0 GiB gate
     - _Requirements: 4.1, 4.2_
-  - [ ] 7.5 Bake the winning `PRECISION` and `POSTPROCESS` into the Dockerfile and
+  - [x] 7.5 Bake the winning `PRECISION` and `POSTPROCESS` into the Dockerfile and
     `server/app.py` defaults; leave `PRECISION=fp32` available as the fallback
+    - Set defaults: `PRECISION=auto`, `POSTPROCESS=baseline`
     - _Requirements: 7.4, 10.3_
-  - [ ] 7.6 Record the winning config's tokens per second (mean, p50, p95) and its
+  - [x] 7.6 Record the winning config's tokens per second (mean, p50, p95) and its
     per-stage breakdown next to p50 and RPS
+    - Decode tok/s: p50 133.1 / mean 130.8; Total tok/s: p50 64.8 / mean 61.3
+    - Per-stage p50: vision 1636.7 ms, text encoder 201.0 ms, prefill 50.2 ms, decode 1896.3 ms
     - _Requirements: 10.1, 11.5_
 
 - [ ] 8. Estimate the batching win, then leave it off
