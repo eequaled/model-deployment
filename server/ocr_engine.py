@@ -230,7 +230,7 @@ class FlorenceOCR:
     def __init__(self, model_dir: Path | str, threads: int = 0, max_new_tokens: int = 0,
                  prefill_mode: str = "", workers: int = 1,
                  postprocess_mode: str = "pure_text",
-                 precision: str = "auto",
+                 precision: str = "int8",
                  allow_fp32_fallback: bool = False) -> None:
         self.model_dir = Path(model_dir)
         self.meta = json.loads((self.model_dir / "meta.json").read_text(encoding="utf-8"))

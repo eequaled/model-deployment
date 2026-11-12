@@ -24,8 +24,8 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 |---|---|
 | Serving stack | **FastAPI + uvicorn**; one inference worker, bounded queue, fast 503s |
 | Model graphs & quantization | 5 graphs; `quant.json` provides `fp32`, `int8`, and `int4` variants |
-| Active precision default | `PRECISION=auto`: **mixed INT4 step graph (79 MB)** + FP32 encoders/prefill; on AVX-VNNI CPUs the text encoder upgrades to QUInt8 |
-| Hardware adaptation | `has_avx_vnni()` at startup; VNNI → `encoder_model.int8.onnx`, otherwise FP32 |
+| Active precision default | `PRECISION=int8`: **INT8 step graph (104 MB)** + FP32 encoders/prefill; INT4 (79 MB) available via `PRECISION=int4` for max speed |
+| Hardware adaptation | `has_avx_vnni()` at startup; only activates with `PRECISION=auto` (FP32 → QUInt8 encoder on VNNI CPUs) |
 | In-memory embedding table | 255 per-token ONNX `Gather` calls eliminated; direct $O(1)$ NumPy table slicing |
 | Decoder graph surgery | Cross-attention keys transposed once in prefill; 6 `Transpose` nodes removed from step |
 | Post-processing | `POSTPROCESS=baseline` replicates transformers tokenization whitespace cleanup |
@@ -168,11 +168,15 @@ CPU has AVX-VNNI.
 
 ### How the decoder quantization works
 
-`MatMulNBits` is **weight-only** quantization. Weights are stored in blocks of 32
-with a symmetric scale per block; activations stay float and are multiplied by the
-dequantized weights on the fly. Because the step graph runs at M=1, it is limited by
-how many bytes the CPU must stream from RAM, not by arithmetic throughput. Shrinking
-the weights is therefore close to a direct speedup:
+`MatMulNBits` is **weight-only** quantization in the sense that the weights are stored
+at 4 or 8 bits and the operator fuses dequantization with the matmul. Weights are
+stored in blocks of 32 with a symmetric scale per block, so each small group has its
+own scale instead of one scale for the whole matrix. `accuracy_level=4` additionally
+permits ORT to quantize the activation block to int8 internally for the int8
+dot-product kernel; with `accuracy_level=0` the activations stay fp32. Because the
+step graph runs at M=1, it is limited by how many bytes the CPU must stream from RAM,
+not by arithmetic throughput. Shrinking the weights is therefore close to a direct
+speedup:
 
 | Step variant | File size | RAM traffic per 255-token page | Decode throughput | 50-image mean accuracy |
 |---|---:|---:|---:|---:|
@@ -235,8 +239,12 @@ AVX2, no AVX-VNNI)**. That matters for quantization:
 * **Modern Intel (12th/13th/14th Gen, Xeon Scalable) and AMD Zen 4 / EPYC Genoa:**
   AVX-VNNI or AVX-512 VNNI executes 8-bit dot products natively (`vpdpbusd`). On
   those CPUs `auto` upgrades `encoder_model` to `encoder_model.int8.onnx`, which is
-  the ~110 ms-per-page win. The decoder step stays mixed INT4 everywhere because it
-  is memory-bandwidth bound and does not need VNNI.
+  the ~110 ms-per-page win. The upgrade is not free in accuracy: QUInt8 encoder +
+  INT4 step measured **0.7922** mean versus **0.7991** with the FP32 encoder on the
+  same 50 documents. It stays above the 0.70 floor, and `PRECISION=int8` keeps the
+  FP32 encoder plus the 0.8753 INT8-step variant if accuracy matters more than
+  decode speed. The decoder step stays mixed INT4 everywhere because it is
+  memory-bandwidth bound and does not need VNNI.
 
 `has_avx_vnni()` reads the Linux `/proc/cpuinfo` flags (`avx_vnni` or
 `avx512_vnni`). Docker, WSL2, and Docker Desktop on Windows all expose the host CPU
@@ -381,7 +389,7 @@ graphs use opset 17, which is inside the supported range.
 |---|---|---|
 | `MODEL_DIR` | `/models` | where the exported graphs live |
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | listen address |
-| `PRECISION` | `auto` | `auto`, `fp32`, `int8`, or `int4`; `auto` = mixed INT4 step + FP32 encoders, with the VNNI encoder upgrade |
+| `PRECISION` | `int8` | `auto`, `fp32`, `int8`, or `int4`; default is accuracy-first INT8 step + FP32 encoders |
 | `POSTPROCESS` | `baseline` | `baseline` (transformers whitespace cleanup) or `pure_text` |
 | `ALLOW_FP32_FALLBACK` | `0` | set to `1` to fall back to FP32 if a quantized file is missing |
 | `ORT_THREADS` | `0` | intra-op threads; `0` sizes from cgroup CPU quota (or lets ORT decide on bare metal) |
@@ -515,7 +523,9 @@ score. V1 (fp32, all five graphs FP32) was tagged `v1-fp32` before the V2 work.
   re-check measured 2.50 GiB. A second worker x 2 threads measured the same 0.35 RPS
   at +77% p50 and 2.90 GiB peak, so throughput cannot be raised by adding workers on
   this CPU count.
-* The AVX-VNNI upgrade is automatic only for `PRECISION=auto`. The bare-metal
+* The AVX-VNNI upgrade is automatic only for `PRECISION=auto`. On VNNI the QUInt8
+  encoder costs about 0.007 mean accuracy (0.7991 → 0.7922 with the INT4 step);
+  `PRECISION=int8` keeps the FP32 encoder and 0.8753 mean accuracy. The bare-metal
   Windows fallback is a processor-name heuristic; set `PRECISION` explicitly if the
   host name is ambiguous.
 * The 40 MP decoded-pixel cap is a memory-safety trade-off. A valid upload under
