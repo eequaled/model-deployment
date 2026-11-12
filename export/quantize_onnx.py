@@ -173,14 +173,14 @@ def write_quant_manifest(models_dir: Path) -> Path:
             "int8": {
                 "vision_encoder": "vision_encoder.onnx",
                 "embed_tokens": "embed_tokens.onnx",
-                "encoder_model": "encoder_model.int8.onnx",
+                "encoder_model": "encoder_model.onnx",
                 "decoder_prefill": "decoder_prefill.onnx",
                 "decoder_step": "decoder_step.int8.onnx",
             },
             "int4": {
                 "vision_encoder": "vision_encoder.onnx",
                 "embed_tokens": "embed_tokens.onnx",
-                "encoder_model": "encoder_model.int8.onnx",
+                "encoder_model": "encoder_model.onnx",
                 "decoder_prefill": "decoder_prefill.onnx",
                 "decoder_step": "decoder_step.int4.onnx",
             },

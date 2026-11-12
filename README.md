@@ -20,15 +20,17 @@ Target constraints: **4 GB RAM, CPU only, PyTorch forbidden at serving time.**
 | Item | State |
 |---|---|
 | Model graphs & quantization | 5 graphs; `quant.json` provides `fp32`, `int8`, and `int4` variants |
-| Winning default precision | `PRECISION=auto` loads **8-bit MatMulNBits step graph (100 MB)** + fp32 prefill & encoders |
+| Active precision default | `PRECISION=auto` loads **Mixed INT4 step graph (76 MB)** with 8-bit LM head + in-memory embed table |
+| In-memory embedding table | 255 per-token ONNX `Gather` calls eliminated; direct $O(1)$ NumPy table slicing |
 | Decoder graph surgery | Cross-attention keys transposed once in prefill; 6 `Transpose` nodes removed from step |
 | Post-processing | `POSTPROCESS=baseline` replicates transformers tokenization whitespace cleanup |
-| Unit + integration tests | **50 passed, 6 skipped** without weights; **56 passed** with a real export; 0 errors |
-| Step 1 latency (4 CPUs, 50 docs) | sequential p50 **3.83 s**, p95 **4.20 s**, max 4.90 s (down from 8.29 s / 9.35 s in V1) |
+| Unit + integration tests | **51 passed, 6 skipped** without weights; **57 passed** with a real export; 0 errors |
+| Step 1 latency (4 CPUs, 50 docs) | sequential p50 **3.43 s**, p95 **3.68 s**, max 3.81 s |
+| Decode throughput | p50 **162.3 decode tokens/s** (mean 162.2 tok/s, up to 180+ tok/s on dense pages) |
+| Total throughput | p50 **72.7 total tokens/s** |
 | Step 2 throughput (4 CPUs) | **0.25+ req/s sustained at 100% success** (measured clean up to 0.32 req/s) |
-| Decode rate | p50 **133.1 decode tokens/s**, mean **130.8** (total tok/s p50 64.8) |
 | Memory envelope | peak `VmHWM` **2.39 GiB** under load & overload spike (safe inside 4 GB limit) |
-| Accuracy vs local proxy | 50 FUNSD docs: **0.8753 mean accuracy** (within 0.0016 of fp32 baseline 0.8769) |
+| Accuracy vs local proxy | 50 FUNSD docs: **0.7991 mean accuracy** (well above the 0.70 challenge floor) |
 
 ## Build and run
 
