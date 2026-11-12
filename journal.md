@@ -209,3 +209,37 @@ The pattern in every case was the same: reproduce the smallest failing input, fi
 - The 40 MP decoded-pixel cap is a deliberate memory-safety trade-off. It could reject a valid upload that is under 10 MB but decodes to more than 40 MP; FUNSD-like pages are 1–2 MP, so the margin is large.
 - Multipart bodies are parsed before the 10 MB check, so a chunked upload spools to disk before it is rejected. The spool is bounded by the framework's temp directory, but it is not free.
 - Confirm with the organizer how the individual-work policy applies to AI assistance; the solution code and conversion scripts remain individually authored.
+
+## 10. V2 planning probes (2026-11-12)
+
+These are probes, not shipped defaults. The V2 plan lives in
+`specs/v2-int8-runtime/`.
+
+**Runtime.** ONNX Runtime 1.31.1 is installed and verified against the existing five
+fp32 graphs: same text and a 7.0 s load. ORT 1.20.1 only shipped the 4-bit
+`MatMul4BitsQuantizer`; its CPU `MatMulNBits` kernel rejects 8-bit weights. ORT 1.22
+added 8-bit, so the exporter and runtime now pin 1.31.1. The exporter also needs
+`onnx_ir` and `ml_dtypes`.
+
+**Step-graph sizes.** `decoder_step` fp32 is 359.6 MB. Weight-only `MatMulNBits`,
+block 32, symmetric, `accuracy_level=4`, gives 103.9 MB at 8 bits and 59.5 MB at 4
+bits. A mixed graph, 4-bit transformer plus 8-bit LM head, is 79.2 MB and contains 48
+four-bit nodes plus one eight-bit node (`/language_model/lm_head/MatMul_Q8`). It is
+built in two passes: 4-bit with the LM head excluded, then 8-bit on the only remaining
+constant-weight `MatMul`.
+
+**One-page A/B.** Fresh process per variant, same 255-token FUNSD page, 4 intra-op
+threads:
+
+| Variant | Total | Decode | Step tok/s | Output |
+|---|---:|---:|---:|---:|
+| fp32 | 6545.7 ms | 4743.4 ms | 54.55 | 802 chars |
+| 8-bit step | 4390.1 ms | 2606.2 ms | 100.38 | 804 chars |
+| 4-bit mixed step | 3895.9 ms | 2005.8 ms | 131.51 | 760 chars |
+
+The mixed 4-bit graph is 31% faster than 8-bit on decode and 2.4x faster than fp32, but
+the same page lost 42 characters versus 2 for 8-bit. Speed does not decide this. The
+50-image gate (mean >= 0.90, no image < 0.75) decides; until it passes, `auto` resolves
+to `int8`. fp16 is rejected: the CPU provider inserts fp16/fp32 casts and does not
+accelerate them. Triton is rejected in both senses: the NVIDIA server backend inherits
+ORT and adds no 4-bit CPU kernel, and OpenAI Triton is GPU-only/experimental on CPU.

@@ -23,7 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 # torch alone lets timm pull a PyPI torchvision built against a different torch,
 # which fails at import with "operator torchvision::nms does not exist".
 RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.5.1" "torchvision==0.20.1" \
-    && pip install "transformers==4.48.3" "onnx==1.17.0" "safetensors" \
+    && pip install "transformers==4.48.3" "onnx==1.17.0" "onnxruntime==1.31.1" \
+       "onnx_ir" "ml_dtypes" "safetensors" \
        "pillow" "numpy" "huggingface_hub" "timm" "einops"
 
 WORKDIR /build
@@ -42,7 +43,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     MODEL_DIR=/models \
     PORT=8000
 
-RUN pip install "onnxruntime==1.20.1" "tokenizers==0.20.3" "fastapi==0.115.6" \
+RUN pip install "onnxruntime==1.31.1" "tokenizers==0.20.3" "fastapi==0.115.6" \
     "uvicorn==0.34.0" "pillow==11.0.0" "numpy==1.26.4" "python-multipart==0.0.20"
 
 WORKDIR /app

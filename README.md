@@ -50,7 +50,8 @@ together** from the CPU index, then `timm`/`einops`/`onnx`:
 ```dockerfile
 RUN pip install --index-url https://download.pytorch.org/whl/cpu \
       "torch==2.5.1" "torchvision==0.20.1" \
-    && pip install "transformers==4.48.3" "onnx==1.17.0" "safetensors" \
+    && pip install "transformers==4.48.3" "onnx==1.17.0" \
+       "onnxruntime==1.31.1" "onnx_ir" "ml_dtypes" "safetensors" \
        "pillow" "numpy" "huggingface_hub" "timm" "einops"
 ```
 
@@ -193,12 +194,13 @@ Not adopted, with reasons:
 ```bash
 python -m venv .venv-export && . .venv-export/bin/activate
 pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-pip install "transformers==4.48.3" "onnx==1.17.0" safetensors pillow numpy \
+pip install "transformers==4.48.3" "onnx==1.17.0" "onnxruntime==1.31.1" \
+    "onnx_ir" "ml_dtypes" safetensors pillow numpy \
     huggingface_hub timm einops
 python export/export_onnx.py --out models
 
 python -m venv .venv-serve && . .venv-serve/bin/activate
-pip install "onnxruntime==1.20.1" "tokenizers==0.20.3" fastapi uvicorn \
+pip install "onnxruntime==1.31.1" "tokenizers==0.20.3" fastapi uvicorn \
     "pillow" numpy python-multipart
 MODEL_DIR=models python -m server.serve
 ```
