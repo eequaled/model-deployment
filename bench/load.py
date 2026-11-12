@@ -38,6 +38,7 @@ def summarize(
     elapsed: float,
     target_rps: float | None = None,
     rate_window: float | None = None,
+    timings_list: list[dict] | None = None,
 ) -> dict:
     """One row per step, in the shape the challenge scores.
 
@@ -70,6 +71,23 @@ def summarize(
     }
     if target_rps is not None:
         row["target_rps"] = round(target_rps, 3)
+
+    if timings_list:
+        timing_fields = [
+            "decode_tokens_per_s",
+            "total_tokens_per_s",
+            "vision_ms",
+            "text_encoder_ms",
+            "prefill_ms",
+            "decode_ms",
+        ]
+        for field in timing_fields:
+            vals = [float(t[field]) for t in timings_list if field in t and t[field] is not None]
+            if vals:
+                row[f"{field}_mean"] = round(statistics.fmean(vals), 1)
+                row[f"{field}_p50"] = round(percentile(vals, 0.50), 1)
+                row[f"{field}_p95"] = round(percentile(vals, 0.95), 1)
+
     print(json.dumps(row), flush=True)
     return row
 
@@ -78,22 +96,26 @@ def sequential(url: str, images: list[Path], repeats: int, timeout: float) -> di
     for image in images[:1]:
         post_image(url, image, timeout)  # warm up, discarded
     latencies, errors = [], 0
+    timings_list: list[dict] = []
     started = time.perf_counter()
     for _ in range(repeats):
         for image in images:
             t0 = time.perf_counter()
             try:
-                post_image(url, image, timeout)
+                text, body = post_image(url, image, timeout)
                 latencies.append(time.perf_counter() - t0)
+                if isinstance(body, dict) and "timings" in body and isinstance(body["timings"], dict):
+                    timings_list.append(body["timings"])
             except Exception as exc:  # a 503, a timeout, or a malformed body
                 errors += 1
                 print("error:", exc)
-    return summarize("latency", latencies, errors, time.perf_counter() - started)
+    return summarize("latency", latencies, errors, time.perf_counter() - started, timings_list=timings_list)
 
 
 def concurrent(url: str, images: list[Path], clients: int, seconds: float, timeout: float) -> dict:
     latencies: list[float] = []
     errors = 0
+    timings_list: list[dict] = []
     lock = threading.Lock()
     stop = time.perf_counter() + seconds
 
@@ -105,9 +127,13 @@ def concurrent(url: str, images: list[Path], clients: int, seconds: float, timeo
             index += 1
             t0 = time.perf_counter()
             try:
-                post_image(url, image, timeout)
+                res = post_image(url, image, timeout)
                 with lock:
                     latencies.append(time.perf_counter() - t0)
+                    if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
+                        body = res[1]
+                        if "timings" in body and isinstance(body["timings"], dict):
+                            timings_list.append(body["timings"])
             except Exception:  # never let one bad response kill a load worker
                 with lock:
                     errors += 1
@@ -118,7 +144,7 @@ def concurrent(url: str, images: list[Path], clients: int, seconds: float, timeo
         thread.start()
     for thread in threads:
         thread.join()
-    return summarize(f"concurrent_{clients}", latencies, errors, time.perf_counter() - started)
+    return summarize(f"concurrent_{clients}", latencies, errors, time.perf_counter() - started, timings_list=timings_list)
 
 
 def open_loop(
@@ -138,6 +164,7 @@ def open_loop(
     if rate <= 0:
         raise ValueError(f"rate must be positive, got {rate}")
     latencies: list[float] = []
+    timings_list: list[dict] = []
     errors = 0
     lock = threading.Lock()
     interval = 1.0 / rate
@@ -150,9 +177,13 @@ def open_loop(
         # the task up: client-side queueing is part of the latency the organizer sees.
         t0 = submitted
         try:
-            sender(url, image, timeout)
+            res = sender(url, image, timeout)
             with lock:
                 latencies.append(time.perf_counter() - t0)
+                if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], dict):
+                    body = res[1]
+                    if "timings" in body and isinstance(body["timings"], dict):
+                        timings_list.append(body["timings"])
         except Exception:
             with lock:
                 errors += 1
@@ -178,7 +209,8 @@ def open_loop(
     # duration so a short step cannot report a rate above its target.
     window = min(seconds, max(interval, dispatch_end - started + interval))
     return summarize(
-        f"open_{rate:g}rps", latencies, errors, elapsed, target_rps=rate, rate_window=window
+        f"open_{rate:g}rps", latencies, errors, elapsed, target_rps=rate, rate_window=window,
+        timings_list=timings_list
     )
 
 

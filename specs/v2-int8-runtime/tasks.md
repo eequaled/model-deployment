@@ -77,18 +77,18 @@
     - Tested in `tests/test_timings.py`
     - _Requirements: 11.2, 11.3_
 
-- [ ] 6. Add the measurement harnesses
-  - [ ] 6.1 Write `bench/precision_sweep.sh`: one container per `PRECISION`
+- [x] 6. Add the measurement harnesses
+  - [x] 6.1 Write `bench/precision_sweep.sh`: one container per `PRECISION`
     (`fp32`, `int8`, `int4`), running accuracy, sequential latency, open-loop rates,
     and `VmHWM`; JSON per config
     - _Requirements: 3.3, 10.1_
-  - [ ] 6.2 Write `bench/postprocess_eval.py` to score both modes against the same
+  - [x] 6.2 Write `bench/postprocess_eval.py` to score both modes against the same
     references and print per-image CER and mean
     - _Requirements: 1.3_
-  - [ ] 6.3 Extend `bench/load.py` to aggregate `decode_tokens_per_s`,
+  - [x] 6.3 Extend `bench/load.py` to aggregate `decode_tokens_per_s`,
     `total_tokens_per_s`, and each per-stage timing as mean/p50/p95, skipping
     fields a V1 server does not send
-    - Add a unit test with synthetic timing rows, including a missing-field case
+    - Unit tests in `tests/test_bench_load.py` with synthetic and missing timing rows
     - _Requirements: 11.4_
 
 - [ ] 7. Measure and decide the defaults
